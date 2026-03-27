@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Skill(claude-api)",
+      "Bash(*)",
+      "WebFetch(domain:jpx-jquants.com)",
+      "WebSearch",
+      "WebFetch(domain:jpx.gitbook.io)",
+      "Skill(update-config)"
+    ]
+  }
+}

@@ -1,0 +1,18 @@
+# 値幅スキャン・材料レポート（scan_daily_movers / report_mover_reasons / 画像レポート）
+# 既存のダッシュボード用とは別インストール可: pip install -r requirements-movers.txt
+#
+# 注意: pip で入れる名前は jquants-api-client（ハイフン付き）。
+# コード側は import jquantsapi のまま（公式クライアントの仕様）。
+# 2.x は Python 3.10 以上。3.9 以下なら 1.9 系が入る（>=1.9.0 で両対応）。
+
+jquants-api-client>=1.9.0
+# make_screening_master_v2.py --yfinance 用 / 開示が薄い銘柄の Yahoo 年次損益フォールバック（任意）
+yfinance>=0.2.36
+pandas>=2.0.0
+pyarrow>=14.0.0
+requests>=2.31.0
+openai>=1.40.0
+python-dotenv>=1.0.0
+
+# ダッシュボードの画像ページを使う場合（本体と合わせてインストール）
+streamlit>=1.33.0

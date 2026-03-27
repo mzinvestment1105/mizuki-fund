@@ -1,0 +1,29 @@
+# 環境設定（APIキー）
+.env
+**/.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 作業用データ（生データはgit管理しない・APIから再取得可能）
+bi/data/raw/
+bi/data/universe/
+bi/data/processed/
+
+# Windows ジャンクション（Linux環境では不要）
+bi/pipelines/data
+
+# ログ・一時ファイル
+*.log
+*.tmp
+*.tmp.parquet
+
+# IDE
+.vscode/
+.cursor/
+*.code-workspace
+
+# Claude Code
+.claude/settings.local.json

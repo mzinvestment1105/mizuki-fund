@@ -1,0 +1,82 @@
+name: スクリーニングマスター更新
+
+on:
+  schedule:
+    - cron: '30 10 * * 1-5'  # 毎週月〜金 19:30 JST（UTC+9）
+  workflow_dispatch:          # 手動実行ボタン（GitHub UI から即時実行可）
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: チェックアウト
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Python セットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: bi/pipelines/requirements.txt
+
+      - name: 依存ライブラリのインストール
+        run: pip install -r bi/pipelines/requirements.txt
+
+      - name: outputs ディレクトリの準備
+        run: mkdir -p bi/outputs
+
+      - name: ETL 実行
+        id: etl
+        env:
+          JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
+          PYTHONIOENCODING: utf-8
+          YFINANCE_STATEMENT_FALLBACK: "1"
+          MARGIN_INTEREST_LOOKBACK_WEEKS: "4"
+          MARGIN_INTEREST_DAY_FALLBACK: "2"
+          SHORT_SALE_LOOKBACK_DAYS: "30"
+        run: |
+          cd bi/pipelines
+          python make_screening_master_v2.py 2>&1 | tee /tmp/etl.log
+
+          # サマリ抽出（LINE通知用）
+          ROWS=$(grep -oP 'rows=\K[0-9]+' /tmp/etl.log | tail -1 || echo "?")
+          YF=$(grep -oP 'yf_used=\K[0-9]+' /tmp/etl.log | tail -1 || echo "?")
+          echo "rows=$ROWS"   >> $GITHUB_OUTPUT
+          echo "yf_used=$YF" >> $GITHUB_OUTPUT
+
+      - name: 出力ファイルをコミット
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add bi/outputs/
+          git diff --staged --quiet \
+            || git commit -m "data: screening master $(date +'%Y-%m-%d')" && git push
+
+      - name: LINE 通知（成功）
+        if: success()
+        env:
+          LINE_NOTIFY_TOKEN: ${{ secrets.LINE_NOTIFY_TOKEN }}
+        run: |
+          curl -s -X POST https://notify-api.line.me/api/notify \
+            -H "Authorization: Bearer $LINE_NOTIFY_TOKEN" \
+            --data-urlencode "message=
+          ✅ スクリーニング完了
+          $(date +'%Y-%m-%d %H:%M') JST
+          銘柄数: ${{ steps.etl.outputs.rows }}
+          YF補完: ${{ steps.etl.outputs.yf_used }}銘柄"
+
+      - name: LINE 通知（失敗）
+        if: failure()
+        env:
+          LINE_NOTIFY_TOKEN: ${{ secrets.LINE_NOTIFY_TOKEN }}
+        run: |
+          curl -s -X POST https://notify-api.line.me/api/notify \
+            -H "Authorization: Bearer $LINE_NOTIFY_TOKEN" \
+            --data-urlencode "message=
+          ❌ スクリーニング失敗
+          $(date +'%Y-%m-%d %H:%M')
+          GitHub Actions のログを確認してください
+          https://github.com/${{ github.repository }}/actions"
