@@ -38,6 +38,7 @@ jobs:
           MARGIN_INTEREST_DAY_FALLBACK: "2"
           SHORT_SALE_LOOKBACK_DAYS: "30"
         run: |
+          set -o pipefail
           cd bi/pipelines
           python make_screening_master_v2.py 2>&1 | tee /tmp/etl.log
 
