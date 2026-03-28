@@ -53,8 +53,11 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add bi/outputs/
-          git diff --staged --quiet \
-            || git commit -m "data: screening master $(date +'%Y-%m-%d')" && git push
+          if ! git diff --staged --quiet; then
+            git commit -m "data: screening master $(date +'%Y-%m-%d')"
+            git pull --rebase origin master
+            git push
+          fi
 
       - name: Discord 通知（成功）
         if: success()
