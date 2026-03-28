@@ -127,6 +127,17 @@ def build_statement_dict_from_yfinance(code4: str) -> dict[str, Any] | None:
     out["Profit_PriorYear_Actual"] = _v(c0, ni_key)
     # Latest は J-Quants（進行期の会社予想・本決算）に任せる
 
+    # c1 データ（1つ前の通期）を _yf_prior_from_c1_* に格納。
+    # merge 側で c0 が JQ Latest と同年度だった場合に c1 を Prior として使う。
+    if len(cols) >= 2:
+        c1 = inc[cols[1]]
+        out["_yf_prior_from_c1_NetSales"] = _v(c1, rev_key)
+        out["_yf_prior_from_c1_OP"] = _v(c1, op_key)
+        out["_yf_prior_from_c1_NP"] = _v(c1, ni_key)
+
+    # c0 の会計年度末日を記録（merge でアライメント判定に使う）
+    out["_yf_fy_date_0"] = pd.Timestamp(cols[0]) if pd.notna(cols[0]) else pd.NaT
+
     # 貸借対照表: 自己資本比率（最新期）
     try:
         bal = t.balance_sheet
@@ -169,6 +180,7 @@ def merge_jquants_with_yfinance_thin(
     yahoo: dict[str, Any] | None,
     *,
     prefer_yahoo_actuals: bool = True,
+    jq_fye_latest: Any = None,
 ) -> dict[str, Any]:
     """
     jq: aggregate_fins_summary_df の結果。yahoo: build_statement_dict_from_yfinance の結果。
@@ -177,10 +189,29 @@ def merge_jquants_with_yfinance_thin(
     - **今年**（Latest）の売上・OP・利益: **J-Quants 優先**（進行期の会社予想・FY 本決算。Yahoo は上書きしない）
     - 自己資本比率・株数: Yahoo で補完（欠損時のみ）
     - 予想列: jq を維持
+
+    jq_fye_latest: JQ の LatestYear の会計年度末 (pd.Timestamp)。
+        Yahoo c0 の会計年度末 (_yf_fy_date_0) と 180 日以内なら c0 は JQ Latest と同年度
+        → c1 を Prior に使う。それ以外は従来どおり c0 = Prior。
     """
     if yahoo is None:
         return jq
     out = dict(jq)
+
+    # --- 会計年度アライメント判定 ---
+    # YF c0 が JQ LatestYear と同じ会計年度かどうかを判定。
+    # 同年度なら c1 を Prior に使い、c0 は Prior に入れない。
+    _use_c1_for_prior = False
+    yf_fy0 = yahoo.get("_yf_fy_date_0")
+    if pd.notna(yf_fy0) and pd.notna(jq_fye_latest):
+        try:
+            d_yf = pd.Timestamp(yf_fy0)
+            d_jq = pd.Timestamp(jq_fye_latest)
+            if abs((d_yf - d_jq).days) <= 180:
+                _use_c1_for_prior = True
+        except Exception:
+            pass
+
     prior_keys = [
         "NetSales_PriorYear_Actual",
         "OperatingProfit_PriorYear_Actual",
@@ -200,8 +231,21 @@ def merge_jquants_with_yfinance_thin(
         "OperatingProfit_NextYear_Forecast",
         "Profit_NextYear_Forecast",
     ]
+
+    # c1 → Prior のマッピング
+    _c1_map = {
+        "NetSales_PriorYear_Actual": "_yf_prior_from_c1_NetSales",
+        "OperatingProfit_PriorYear_Actual": "_yf_prior_from_c1_OP",
+        "Profit_PriorYear_Actual": "_yf_prior_from_c1_NP",
+    }
+
     for k in prior_keys:
-        yv = yahoo.get(k)
+        if _use_c1_for_prior:
+            # c0 は JQ Latest と同年度 → c1 を Prior に使う
+            c1_key = _c1_map.get(k)
+            yv = yahoo.get(c1_key) if c1_key else pd.NA
+        else:
+            yv = yahoo.get(k)
         if prefer_yahoo_actuals and pd.notna(yv):
             out[k] = yv
         elif pd.isna(out.get(k)) and pd.notna(yv):

@@ -406,7 +406,10 @@ def main() -> None:
                     _yf_fetched = True
                     if _ydict is not None:
                         _ser_before_yf = dict(ser)
-                        ser = merge_jquants_with_yfinance_thin(ser, _ydict)
+                        ser = merge_jquants_with_yfinance_thin(
+                            ser, _ydict,
+                            jq_fye_latest=ser.get("_jq_fye_latest"),
+                        )
                         _yf_used = True
                 except ImportError:
                     pass
@@ -445,6 +448,11 @@ def main() -> None:
                 disc_out = dd.max() if dd.notna().any() else pd.NaT
             else:
                 disc_out = pd.NaT
+
+            # 内部キー（_jq_fye_*, _yf_* 等）を除去してから出力行を作成
+            for _internal_key in list(ser.keys()):
+                if _internal_key.startswith("_jq_fye_") or _internal_key.startswith("_yf_"):
+                    del ser[_internal_key]
 
             one_row = pd.DataFrame(
                 [{"Code": code4, **{c: ser[c] for c in STATEMENT_NUMERIC_COLS}, "DiscDate": disc_out, "YFinance_Supplemented": _yf_used}]
