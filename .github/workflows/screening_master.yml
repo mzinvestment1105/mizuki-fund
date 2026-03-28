@@ -1,6 +1,6 @@
 name: スクリーニングマスター更新
 
-on:
+"on":
   schedule:
     - cron: '30 10 * * 1-5'  # 毎週月〜金 19:30 JST（UTC+9）
   workflow_dispatch:          # 手動実行ボタン（GitHub UI から即時実行可）
