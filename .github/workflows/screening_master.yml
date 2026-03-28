@@ -41,7 +41,7 @@ jobs:
           cd bi/pipelines
           python make_screening_master_v2.py 2>&1 | tee /tmp/etl.log
 
-          # サマリ抽出（LINE通知用）
+          # サマリ抽出（Discord通知用）
           ROWS=$(grep -oP 'rows=\K[0-9]+' /tmp/etl.log | tail -1 || echo "?")
           YF=$(grep -oP 'yf_used=\K[0-9]+' /tmp/etl.log | tail -1 || echo "?")
           echo "rows=$ROWS"   >> $GITHUB_OUTPUT
@@ -55,28 +55,20 @@ jobs:
           git diff --staged --quiet \
             || git commit -m "data: screening master $(date +'%Y-%m-%d')" && git push
 
-      - name: LINE 通知（成功）
+      - name: Discord 通知（成功）
         if: success()
         env:
-          LINE_NOTIFY_TOKEN: ${{ secrets.LINE_NOTIFY_TOKEN }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
-          curl -s -X POST https://notify-api.line.me/api/notify \
-            -H "Authorization: Bearer $LINE_NOTIFY_TOKEN" \
-            --data-urlencode "message=
-          ✅ スクリーニング完了
-          $(date +'%Y-%m-%d %H:%M') JST
-          銘柄数: ${{ steps.etl.outputs.rows }}
-          YF補完: ${{ steps.etl.outputs.yf_used }}銘柄"
+          curl -s -X POST "$DISCORD_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d "{\"content\": \"✅ スクリーニング完了\n$(date +'%Y-%m-%d %H:%M') JST\n銘柄数: ${{ steps.etl.outputs.rows }}\nYF補完: ${{ steps.etl.outputs.yf_used }}銘柄\"}"
 
-      - name: LINE 通知（失敗）
+      - name: Discord 通知（失敗）
         if: failure()
         env:
-          LINE_NOTIFY_TOKEN: ${{ secrets.LINE_NOTIFY_TOKEN }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
-          curl -s -X POST https://notify-api.line.me/api/notify \
-            -H "Authorization: Bearer $LINE_NOTIFY_TOKEN" \
-            --data-urlencode "message=
-          ❌ スクリーニング失敗
-          $(date +'%Y-%m-%d %H:%M')
-          GitHub Actions のログを確認してください
-          https://github.com/${{ github.repository }}/actions"
+          curl -s -X POST "$DISCORD_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d "{\"content\": \"❌ スクリーニング失敗\n$(date +'%Y-%m-%d %H:%M') JST\nログを確認: https://github.com/${{ github.repository }}/actions\"}"
