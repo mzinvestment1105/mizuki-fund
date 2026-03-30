@@ -433,6 +433,7 @@ def main() -> None:
                     _fv = ser.get(_k)
                     _audit[f"{_k}_JQ"] = _jv
                     _audit[f"{_k}_YF"] = _yv
+                    _audit[f"{_k}_Final"] = _fv
                     if pd.isna(_fv):
                         _src = "NONE"
                     elif _yf_used and _ydict and pd.notna(_yv) and (pd.isna(_jv) or _fv == _yv):
@@ -831,6 +832,11 @@ def main() -> None:
         if "CompanyName" in master.columns:
             audit_df = audit_df.merge(master[["Code", "CompanyName"]], on="Code", how="left")
             cols = ["Code", "CompanyName", "JQ_Thin", "YFinance_Fetched", "YFinance_Used", "JQ_TotalRows"]
+            for _k in STATEMENT_NUMERIC_COLS:
+                for _s in ("Final", "JQ", "YF", "Source"):
+                    _c = f"{_k}_{_s}"
+                    if _c in audit_df.columns and _c not in cols:
+                        cols.append(_c)
             cols += [c for c in audit_df.columns if c not in cols]
             audit_df = audit_df[cols]
         audit_df.to_parquet(audit_path, index=False)

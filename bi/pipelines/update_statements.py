@@ -192,6 +192,46 @@ def _forecast_nx_by_newest_disc_date(
     return best_v
 
 
+def _forecast_by_newest_disc_date_with_meta(
+    scan: pd.DataFrame,
+    consolidated: list[str],
+    non_consolidated: list[str],
+) -> tuple[Any, Any]:
+    """
+    数値と、その採用元 DiscDate を返す。
+    """
+    if scan is None or scan.empty:
+        return pd.NA, pd.NaT
+    if "DiscDate" not in scan.columns:
+        v = _forecast_first_non_na_from_newest(scan, consolidated, non_consolidated)
+        return v, pd.NaT
+    max_age_raw = os.environ.get("NX_FORECAST_MAX_AGE_DAYS", "").strip()
+    if max_age_raw:
+        max_age_days = int(max_age_raw)
+    else:
+        max_age_days = int(os.environ.get("NX_FSALES_MAX_AGE_DAYS", "550"))
+    d_series = pd.to_datetime(scan["DiscDate"], errors="coerce")
+    d_last = d_series.iloc[-1] if len(scan) else pd.NaT
+    if pd.isna(d_last):
+        d_last = d_series.max()
+    best_v: Any = pd.NA
+    best_dd = pd.NaT
+    for pos in range(len(scan)):
+        r = scan.iloc[pos]
+        v = _val_from_row(r, consolidated, non_consolidated)
+        if pd.isna(v):
+            continue
+        dd = pd.to_datetime(r.get("DiscDate"), errors="coerce")
+        if pd.isna(dd):
+            continue
+        if pd.notna(d_last) and (d_last - dd).days > max_age_days:
+            continue
+        if pd.isna(best_dd) or dd > best_dd:
+            best_dd = dd
+            best_v = v
+    return best_v, best_dd
+
+
 def _next_year_sales_forecast_from_nx_columns(scan: pd.DataFrame) -> Any:
     """
     翌期売上（来年通期予想）。
@@ -339,6 +379,40 @@ def _forecast_from_next_fy_rows(
     return pd.NA
 
 
+def _forecast_from_next_fy_rows_with_meta(
+    work: pd.DataFrame,
+    fye_cy: Any,
+    consolidated: list[str],
+    non_consolidated: list[str],
+) -> tuple[Any, Any]:
+    """
+    翌期行フォールバックの値と採用元 DiscDate を返す。
+    """
+    if work is None or work.empty or "_fye" not in work.columns or pd.isna(fye_cy):
+        return pd.NA, pd.NaT
+    fn_cy = pd.to_datetime(fye_cy, errors="coerce").normalize()
+    if pd.isna(fn_cy):
+        return pd.NA, pd.NaT
+    all_fyes = work["_fye"].dropna().unique()
+    future = [f for f in all_fyes if pd.Timestamp(f) > fn_cy]
+    if not future:
+        return pd.NA, pd.NaT
+    fye_next = min(future)
+    sub = work.loc[work["_fye"] == fye_next]
+    if sub.empty:
+        return pd.NA, pd.NaT
+    if "DiscDate" in sub.columns:
+        sub = sub.sort_values("DiscDate", ascending=False, kind="mergesort")
+    else:
+        sub = sub.iloc[::-1]
+    for pos in range(len(sub)):
+        r = sub.iloc[pos]
+        v = _val_from_row(r, consolidated, non_consolidated)
+        if pd.notna(v):
+            return v, pd.to_datetime(r.get("DiscDate"), errors="coerce")
+    return pd.NA, pd.NaT
+
+
 def _apply_forecasts_from_newest_disclosure_row_only(
     out: dict[str, Any],
     work: pd.DataFrame,
@@ -365,30 +439,36 @@ def _apply_forecasts_from_newest_disclosure_row_only(
     else:
         scan = work
 
-    out["NetSales_NextYear_Forecast"] = _next_year_sales_forecast_from_nx_columns(scan)
-    # Kabutan 推定式（FSales/FNCSales 経由）は予想未開示銘柄に誤値を入れるため廃止。
-    # NxFSales が空 = 予想無し（pd.NA のまま）として扱う。
-    out["OperatingProfit_NextYear_Forecast"] = _forecast_nx_by_newest_disc_date(
-        scan, ["NxFOP"], ["NxFNCOP"]
-    )
-    out["Profit_NextYear_Forecast"] = _forecast_nx_by_newest_disc_date(
-        scan, ["NxFNp", "NxFNP"], ["NxFNCNP"]
-    )
+    nx_sales, nx_sales_dd = _forecast_by_newest_disc_date_with_meta(scan, ["NxFSales"], ["NxFNCSales"])
+    nx_op, nx_op_dd = _forecast_by_newest_disc_date_with_meta(scan, ["NxFOP"], ["NxFNCOP"])
+    nx_np, nx_np_dd = _forecast_by_newest_disc_date_with_meta(scan, ["NxFNp", "NxFNP"], ["NxFNCNP"])
 
-    # フォールバック: NxF* が空 → 翌期行の F*/FNC* から予想を取得
+    next_sales, next_sales_dd = pd.NA, pd.NaT
+    next_op, next_op_dd = pd.NA, pd.NaT
+    next_np, next_np_dd = pd.NA, pd.NaT
     if pd.notna(fye_cy) and "_fye" in work.columns:
-        if pd.isna(out["NetSales_NextYear_Forecast"]):
-            out["NetSales_NextYear_Forecast"] = _forecast_from_next_fy_rows(
-                work, fye_cy, ["FSales"], ["FNCSales"]
-            )
-        if pd.isna(out["OperatingProfit_NextYear_Forecast"]):
-            out["OperatingProfit_NextYear_Forecast"] = _forecast_from_next_fy_rows(
-                work, fye_cy, ["FOP"], ["FNCOP"]
-            )
-        if pd.isna(out["Profit_NextYear_Forecast"]):
-            out["Profit_NextYear_Forecast"] = _forecast_from_next_fy_rows(
-                work, fye_cy, ["FNp", "FNP"], ["FNCNP"]
-            )
+        next_sales, next_sales_dd = _forecast_from_next_fy_rows_with_meta(
+            work, fye_cy, ["FSales"], ["FNCSales"]
+        )
+        next_op, next_op_dd = _forecast_from_next_fy_rows_with_meta(
+            work, fye_cy, ["FOP"], ["FNCOP"]
+        )
+        next_np, next_np_dd = _forecast_from_next_fy_rows_with_meta(
+            work, fye_cy, ["FNp", "FNP"], ["FNCNP"]
+        )
+
+    out["NetSales_NextYear_Forecast"] = nx_sales
+    out["OperatingProfit_NextYear_Forecast"] = nx_op
+    out["Profit_NextYear_Forecast"] = nx_np
+
+    # Nx* と翌期行 F* が競合する場合は、より新しい開示日の値を採用（株探の修正履歴に合わせる）。
+    if pd.notna(next_sales) and (pd.isna(nx_sales) or (pd.notna(next_sales_dd) and pd.notna(nx_sales_dd) and next_sales_dd >= nx_sales_dd)):
+        out["NetSales_NextYear_Forecast"] = next_sales
+    if pd.notna(next_op) and (pd.isna(nx_op) or (pd.notna(next_op_dd) and pd.notna(nx_op_dd) and next_op_dd >= nx_op_dd)):
+        out["OperatingProfit_NextYear_Forecast"] = next_op
+    if pd.notna(next_np) and (pd.isna(nx_np) or (pd.notna(next_np_dd) and pd.notna(nx_np_dd) and next_np_dd >= nx_np_dd)):
+        out["Profit_NextYear_Forecast"] = next_np
+
 
 
 def _attach_fye_and_4q_fy_rank(frame: pd.DataFrame) -> pd.DataFrame | None:
