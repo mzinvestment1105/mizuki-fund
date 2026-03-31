@@ -2,7 +2,7 @@ name: スクリーニングマスター更新
 
 "on":
   schedule:
-    - cron: '30 10 * * 1-5'  # 毎週月〜金 19:30 JST（UTC+9）
+    - cron: '0 10 * * 1-5'   # 毎週月〜金 19:00 JST（UTC+9）混雑ピーク（:30分台）を回避
   workflow_dispatch:          # 手動実行ボタン（GitHub UI から即時実行可）
 
 jobs:
