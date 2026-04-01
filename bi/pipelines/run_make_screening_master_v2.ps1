@@ -39,7 +39,7 @@ if (-not $env:JQUANTS_API_KEY -or $env:JQUANTS_API_KEY.Length -eq 0) {
 # ------------------------------------------------------------
 # 実行時固定設定
 # ------------------------------------------------------------
-$env:YFINANCE_STATEMENT_FALLBACK = "1"          # yfinance財務補完 ON
+$env:YFINANCE_STATEMENT_FALLBACK = "1"          # yfinance財務補完 ON（thin判定の過去方式）
 $env:MARGIN_INTEREST_LOOKBACK_WEEKS = "4"        # 信用残: 直近4週
 $env:MARGIN_INTEREST_DAY_FALLBACK = "2"          # 信用残: 日付フォールバック2日
 $env:SHORT_SALE_LOOKBACK_DAYS = "30"             # 空売り: 直近30日

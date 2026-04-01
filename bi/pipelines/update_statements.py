@@ -469,6 +469,20 @@ def _apply_forecasts_from_newest_disclosure_row_only(
     if pd.notna(next_np) and (pd.isna(nx_np) or (pd.notna(next_np_dd) and pd.notna(nx_np_dd) and next_np_dd >= nx_np_dd)):
         out["Profit_NextYear_Forecast"] = next_np
 
+    # NxFSales も翌期行 FSales も無い銘柄向けフォールバック（例: 130A）。
+    # /fins/summary の仕様上、翌期の数値が Nx* にも翌期行 F* にも現れないことがあるため、
+    # 「株探の予に近い」推定を使う（推定条件が揃わない場合は NA のまま）。
+    if (
+        pd.isna(out.get("NetSales_NextYear_Forecast"))
+        and sort_keys is not None
+        and pd.notna(fye_py)
+        and work is not None
+        and not work.empty
+    ):
+        implied = _next_year_sales_forecast_implied_kabutan_style(out, work, fye_py, sort_keys)
+        if pd.notna(implied):
+            out["NetSales_NextYear_Forecast"] = implied
+
 
 
 def _attach_fye_and_4q_fy_rank(frame: pd.DataFrame) -> pd.DataFrame | None:
@@ -514,7 +528,33 @@ def _attach_fye_and_4q_fy_rank(frame: pd.DataFrame) -> pd.DataFrame | None:
                 fs_mask = doc.str.contains("FinancialStatements", case=False, na=False)
                 if fs_mask.any():
                     sub2 = sub2.loc[fs_mask].sort_values(disc_cols, ascending=True, kind="mergesort")
-            out_rows.append(sub2.iloc[-1])
+            # 最新行が「数値は同じだが一部カラムが欠落」などのケースがある。
+            # 実績（Sales/OP/NP など）を安定させるため、まず「必要項目が揃っている行」を優先し、
+            # 同点なら開示が新しい行（disc_cols が大きい）を採用する。
+            key_cols = [
+                "Sales",
+                "NCSales",
+                "OP",
+                "NCOP",
+                "NP",
+                "NCNP",
+                "EqAR",
+                "NCEqAR",
+                "ShOutFY",
+            ]
+            present = [c for c in key_cols if c in sub2.columns]
+            if present:
+                tmp = sub2.copy()
+                score = pd.Series(0, index=tmp.index, dtype="int64")
+                for c in present:
+                    v = pd.to_numeric(tmp[c], errors="coerce")
+                    score = score + v.notna().astype("int64")
+                tmp["_score_complete"] = score
+                # completeness 昇順→末尾が最大、disc_cols 昇順→末尾が最新
+                tmp = tmp.sort_values(["_score_complete"] + disc_cols, ascending=True, kind="mergesort")
+                out_rows.append(tmp.iloc[-1].drop(labels=["_score_complete"]))
+            else:
+                out_rows.append(sub2.iloc[-1])
     if not out_rows:
         return None
     return pd.DataFrame(out_rows)
