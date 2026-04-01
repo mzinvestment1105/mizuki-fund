@@ -59,6 +59,14 @@ PMの哲学に基づき、以下のシグナルを検知した場合は明確に
 - `market/daily/YYYY-MM-DD.md` - デイリーレポート
 - `market/macro_thesis.md` - 見通しの更新
 
+## 夜間問い合わせ時の運用
+- PMから夜に「明日の動向」を聞かれた場合、`python_investment/night_market_report.py` の最新出力を優先参照する
+- `market/daily/YYYY-MM-DD.md` に Night Quant Snapshot / Night Qual News / 明日の見立て を残す
+- 必ず以下を明示する:
+  - 定量: 日経先物ラージ(近似)、ダウ、サンデーダウ代替(米先物バスケット)
+  - 定性: 直近ニュース 3-5 件
+  - リスク: 欠損データと速報値の不確実性
+
 ## Skills / 使えるツール
 - **Web検索**: マクロ経済ニュース・指標データ・要人発言のリアルタイム取得
 - **BI連携**: bi/outputs/ のマクロデータ・ダッシュボードを参照

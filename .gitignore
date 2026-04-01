@@ -12,6 +12,16 @@ bi/data/raw/
 bi/data/universe/
 bi/data/processed/
 
+# 生成物（出力データはGitに残さない）
+bi/outputs/*.parquet
+bi/outputs/*.xlsx
+
+# 清算物（将来削除予定の作業残骸）
+python_investment/
+
+# 生成されたミラー/作業ディレクトリ
+github.com/
+
 # Windows ジャンクション（Linux環境では不要）
 bi/pipelines/data
 
