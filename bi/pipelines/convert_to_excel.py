@@ -53,6 +53,9 @@ JP_HEADERS: dict[str, str] = {
     "AnnouncementDate": "決算発表予定日",
     "FiscalYear": "会計年度",
     "YFinance_Supplemented": "YF補完",
+    "ETLRunId": "ETL実行ID",
+    "ETLStartedAtUTC": "ETL開始時刻(UTC)",
+    "ETLStartedAtJST": "ETL開始時刻(JST)",
 }
 
 # Excel 表示用（科学記数法・#### 緩和）

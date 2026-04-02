@@ -1,7 +1,7 @@
 import argparse
 import os
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -193,6 +193,12 @@ def main() -> None:
         " 省略時は yfinance が入っていれば自動（YFINANCE_STATEMENT_FALLBACK=0 で無効化）。",
     )
     args = parser.parse_args()
+    etl_started_at_utc = datetime.now(timezone.utc).replace(microsecond=0)
+    jst = timezone(timedelta(hours=9))
+    etl_started_at_jst = etl_started_at_utc.astimezone(jst)
+    etl_started_at_utc_str = etl_started_at_utc.isoformat()
+    etl_started_at_jst_str = etl_started_at_jst.isoformat()
+    etl_run_id = etl_started_at_jst.strftime("%Y%m%d-%H%M%S")
     want_excel = not args.no_excel
     _yf_stmt_env = os.environ.get("YFINANCE_STATEMENT_FALLBACK", "1").strip().lower()
     use_yfinance_statement_fallback = (not args.no_yfinance_statements) and _yf_stmt_env not in (
@@ -761,6 +767,10 @@ def main() -> None:
         master["AnnouncementDate"] = master["AnnouncementDate"].fillna(master["StatementDisclosedDate"])
     # helper column is not part of final output; it will be ignored by required_final_cols
     master["MarketCap"] = pd.to_numeric(master["MarketCap"], errors="coerce")
+    # 出力監査用: このデータがいつの ETL 実行で作られたかを全行に明示
+    master["ETLRunId"] = etl_run_id
+    master["ETLStartedAtUTC"] = etl_started_at_utc_str
+    master["ETLStartedAtJST"] = etl_started_at_jst_str
 
     required_final_cols = [
         "Code",
@@ -796,6 +806,9 @@ def main() -> None:
         "FiscalQuarter",
         "FiscalYear",
         "YFinance_Supplemented",
+        "ETLRunId",
+        "ETLStartedAtUTC",
+        "ETLStartedAtJST",
         ]
     )
 
@@ -822,6 +835,10 @@ def main() -> None:
     tmp_path.replace(out_path)
 
     print(f"saved: {out_path} rows={len(master)} cols={len(master.columns)}")
+    print(
+        f"etl metadata: run_id={etl_run_id} "
+        f"started_utc={etl_started_at_utc_str} started_jst={etl_started_at_jst_str}"
+    )
     print(master.head(5))
 
     # Yahoo Finance 補完監査ログ出力
