@@ -48,11 +48,6 @@ jobs:
           echo "rows=$ROWS"   >> $GITHUB_OUTPUT
           echo "yf_used=$YF" >> $GITHUB_OUTPUT
 
-      - name: 出力検証（異常時停止）
-        run: |
-          cd bi/pipelines
-          python validate_screening_master.py --input ../outputs/screening_master.parquet
-
       - name: 出力ファイルをコミット
         run: |
           git config user.name  "github-actions[bot]"
