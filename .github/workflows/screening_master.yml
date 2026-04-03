@@ -52,10 +52,11 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin master
+          git rebase origin/master
           git add bi/outputs/
           if ! git diff --staged --quiet; then
             git commit -m "data: screening master $(date +'%Y-%m-%d')"
-            git pull --rebase origin master
             git push
           fi
 
