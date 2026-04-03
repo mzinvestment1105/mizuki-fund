@@ -14,6 +14,7 @@ openpyxl>=3.1.0
 requests>=2.31.0
 openai>=1.40.0
 python-dotenv>=1.0.0
+pdfminer.six>=20221105
 
 # ダッシュボードの画像ページを使う場合（本体と合わせてインストール）
 streamlit>=1.33.0

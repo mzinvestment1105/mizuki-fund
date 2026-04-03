@@ -44,6 +44,14 @@ JP_HEADERS: dict[str, str] = {
     "Profit_PriorYear_Actual": "最終益_昨年通期実績",
     "Profit_LatestYear_Actual": "最終益_今年通期実績",
     "Profit_NextYear_Forecast": "最終益_来年通期予想",
+    "NetSales_TwoYearsPrior_Actual": "売上高_一昨年通期実績",
+    "OperatingProfit_TwoYearsPrior_Actual": "営業利益_一昨年通期実績",
+    "Profit_TwoYearsPrior_Actual": "最終益_一昨年通期実績",
+    "CashAndEquivalents_LatestFY": "現金及び現金同等物_直近期末",
+    "Equity_LatestFY": "純資産額_直近期末",
+    "PER_Trailing": "PER_実績ベース",
+    "PBR_Trailing": "PBR_実績ベース",
+    "ROE_LatestYear": "ROE_今期実績",
     "EquityToAssetRatio": "自己資本比率",
     "NumberOfIssuedAndOutstandingSharesAtTheEndOfFiscalYearIncludingTreasuryStock": "期末発行株式数（自己株含む）",
     "ShortMarginTradeVolume": "信用売り残",
@@ -59,15 +67,65 @@ JP_HEADERS: dict[str, str] = {
 }
 
 # Excel 表示用（科学記数法・#### 緩和）
+# #,##0 はロケールの千桁区切り（日本語環境ではカンマ）
 _NUM_FMT_INT = "#,##0"
 _NUM_FMT_FLOAT = "#,##0.00"
-_NUM_FMT_RATIO = "0.000"
-_NUM_FMT_PERCENT_1DP = "0.0%"
+# セル値は 0〜1（例: 0.352 → 35.20%）。既に 35.2 のような百分率の数値は 100 で割ってから保存する。
+_NUM_FMT_PERCENT = "0.00%"
 _MIN_WIDTH_BY_JP_HEADER: dict[str, float] = {
     "決算発表予定日": 14,
     "会計年度": 12,
     "銘柄名": 28,
 }
+# 大金額・カンマ付きで #### にならないよう最低幅（文字相当）
+_MIN_WIDTH_NUMERIC = 14
+_MIN_WIDTH_MONEY = 16
+_MAX_COL_WIDTH = 55
+
+
+def _estimate_display_chars(v: object, *, prefer_float: bool = False) -> int:
+    """セル表示のおおよその文字数（列幅の目安）。千桁カンマ付きを想定。"""
+    if v is None or v == "":
+        return 0
+    if isinstance(v, bool):
+        return 5
+    if isinstance(v, (datetime, date)):
+        return 12
+    if isinstance(v, str):
+        return len(v)
+    if isinstance(v, (int, float)):
+        try:
+            fv = float(v)
+            if fv != fv:  # nan
+                return 0
+            if abs(fv) >= 1e15:
+                return 14
+            if prefer_float or (isinstance(v, float) and abs(fv - round(fv)) > 1e-6):
+                return len(f"{fv:,.2f}")
+            return len(f"{int(round(fv)):,}")
+        except (OverflowError, ValueError):
+            return len(str(v))
+    return len(str(v))
+
+
+def _equity_ratio_as_excel_fraction(raw: object) -> float | None:
+    """自己資本比率を Excel の % 書式用（0〜1）にそろえる。"""
+    try:
+        fv = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if fv != fv:  # nan
+        return None
+    if fv > 1.0 + 1e-6:
+        return fv / 100.0
+    return fv
+
+
+def _estimate_percent_display_chars(v: object) -> int:
+    fr = _equity_ratio_as_excel_fraction(v)
+    if fr is None:
+        return 0
+    return max(len(f"{fr * 100:.2f}%"), 7)
 
 
 def _apply_excel_display_formats(path: Path, header_row: int = 1) -> None:
@@ -103,25 +161,22 @@ def _apply_excel_display_formats(path: Path, header_row: int = 1) -> None:
         "最終益_昨年通期実績",
         "最終益_今年通期実績",
         "最終益_来年通期予想",
+        "売上高_一昨年通期実績",
+        "営業利益_一昨年通期実績",
+        "最終益_一昨年通期実績",
+        "現金及び現金同等物_直近期末",
+        "純資産額_直近期末",
         "期末発行株式数（自己株含む）",
         "信用売り残",
         "信用買い残",
         "空売り残高（株数）",
         "出来高_5日平均",
     }
-
-    # Q列（17列目）だけ % 表示（要望: 0.0%）
-    percent_col_idx = 17
-    if ws.max_column >= percent_col_idx:
-        for r in range(header_row + 1, ws.max_row + 1):
-            cell = ws.cell(r, percent_col_idx)
-            if cell.value is not None and cell.value != "":
-                cell.number_format = _NUM_FMT_PERCENT_1DP
-
-        q_letter = get_column_letter(percent_col_idx)
-        cur_q = ws.column_dimensions[q_letter].width
-        if cur_q is None or cur_q < 12:
-            ws.column_dimensions[q_letter].width = 12
+    ratio_metric_jp = {
+        "PER_実績ベース",
+        "PBR_実績ベース",
+        "ROE_今期実績",
+    }
 
     for jp, cidx in headers.items():
         letter = get_column_letter(cidx)
@@ -131,48 +186,32 @@ def _apply_excel_display_formats(path: Path, header_row: int = 1) -> None:
                 cell = ws.cell(r, cidx)
                 if cell.value is not None and cell.value != "":
                     cell.number_format = fmt
+        elif jp in ratio_metric_jp:
+            for r in range(header_row + 1, ws.max_row + 1):
+                cell = ws.cell(r, cidx)
+                if cell.value is not None and cell.value != "":
+                    cell.number_format = _NUM_FMT_FLOAT
         elif jp == "自己資本比率":
             for r in range(header_row + 1, ws.max_row + 1):
                 cell = ws.cell(r, cidx)
                 if cell.value is not None and cell.value != "":
-                    cell.number_format = _NUM_FMT_RATIO
+                    fr = _equity_ratio_as_excel_fraction(cell.value)
+                    if fr is not None:
+                        cell.value = fr
+                    cell.number_format = _NUM_FMT_PERCENT
 
-        # 可能な範囲で列幅を自動調整（#### が出にくくする）
-        # 文字数ベースで上限を設け、極端に広くならないようにする
-        max_len = 0
-        scan_rows = min(ws.max_row, header_row + 200)
-        for r in range(header_row, scan_rows + 1):
-            v = ws.cell(r, cidx).value
-            if v is None:
-                continue
-            # 日付は YYYY-MM-DD 程度を想定
-            if isinstance(v, (datetime, date)):
-                s = v.strftime("%Y-%m-%d")
-            else:
-                s = str(v)
-            if len(s) > max_len:
-                max_len = len(s)
+    # 銘柄コードやIDは整数でもカンマ付けしない（見た目が崩れるため）
+    _skip_auto_numeric_headers = {"銘柄コード", "ETL実行ID"}
 
-        wch = _MIN_WIDTH_BY_JP_HEADER.get(jp)
-        if wch is not None:
-            ws.column_dimensions[letter].width = max(wch, ws.column_dimensions[letter].width or 0, min(60, max_len + 2))
-        else:
-            # デフォルト幅が狭いと日付が #### になるため最低幅
-            cur = ws.column_dimensions[letter].width
-            if cur is None or cur < 10:
-                ws.column_dimensions[letter].width = max(12, min(60, max_len + 2))
-            else:
-                ws.column_dimensions[letter].width = max(cur, min(60, max_len + 2))
-
-    # 「全数値カンマ」: 明らかに数値列の列に書式をつける（Q列と日付は除外）
+    # 「全数値カンマ」: 上記以外の数値主体列（日付・テキスト列は除外）
     for cidx in range(1, ws.max_column + 1):
-        if cidx == percent_col_idx:
-            continue
-
-        # 見出しで日付っぽい列を除外（例: 決算発表予定日）
         header_val = ws.cell(header_row, cidx).value
         header_s = str(header_val) if header_val is not None else ""
-        if "日" in header_s or "Date" in header_s:
+        if header_s in _skip_auto_numeric_headers:
+            continue
+        if "日" in header_s or "Date" in header_s or "時刻" in header_s:
+            continue
+        if header_s in money_jp or header_s in ratio_metric_jp or header_s == "自己資本比率":
             continue
 
         nonnull = 0
@@ -186,7 +225,6 @@ def _apply_excel_display_formats(path: Path, header_row: int = 1) -> None:
             if isinstance(v, bool):
                 continue
             if isinstance(v, (datetime, date)):
-                # 日付は除外
                 numeric = 0
                 nonnull = 0
                 break
@@ -194,6 +232,11 @@ def _apply_excel_display_formats(path: Path, header_row: int = 1) -> None:
                 numeric += 1
                 if isinstance(v, float) and abs(v - int(v)) > 1e-9:
                     any_float = True
+            elif isinstance(v, str) and v != "予想無し":
+                # 銘柄名などと混在する列は数値列扱いしない
+                numeric = 0
+                nonnull = 0
+                break
 
         if nonnull == 0:
             continue
@@ -204,10 +247,37 @@ def _apply_excel_display_formats(path: Path, header_row: int = 1) -> None:
         for r in range(header_row + 1, ws.max_row + 1):
             cell = ws.cell(r, cidx)
             if cell.value is not None and cell.value != "":
-                # 既に別書式を付けている列（例: 自己資本比率）は上書きしない
                 if cell.number_format not in ("General", "0", "0.0", "0.00"):
                     continue
                 cell.number_format = fmt
+
+    # 列幅: 全データ行を走査し #### 回避（ヘッダ長・カンマ付き表示幅の大きい方）
+    for jp, cidx in headers.items():
+        letter = get_column_letter(cidx)
+        hdr_w = len(jp) + 3
+        max_cell = hdr_w
+        floor = _MIN_WIDTH_BY_JP_HEADER.get(jp, 10)
+        if jp in money_jp:
+            floor = max(floor, _MIN_WIDTH_MONEY)
+        elif jp in ratio_metric_jp or jp == "自己資本比率":
+            floor = max(floor, _MIN_WIDTH_NUMERIC)
+
+        prefer_float = jp in ratio_metric_jp
+        is_eq_ratio = jp == "自己資本比率"
+
+        for r in range(header_row + 1, ws.max_row + 1):
+            v = ws.cell(r, cidx).value
+            if v is None or v == "":
+                continue
+            if is_eq_ratio:
+                wch = _estimate_percent_display_chars(v)
+            else:
+                wch = _estimate_display_chars(v, prefer_float=prefer_float)
+            if wch > max_cell:
+                max_cell = wch
+
+        target = min(_MAX_COL_WIDTH, max(max_cell + 2, floor, hdr_w))
+        ws.column_dimensions[letter].width = float(target)
 
     wb.save(path)
 

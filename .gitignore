@@ -15,6 +15,7 @@ bi/data/processed/
 # 生成物（出力データはGitに残さない）
 bi/outputs/*.parquet
 bi/outputs/*.xlsx
+bi/outputs/notion_sync_state.json
 
 # 清算物（将来削除予定の作業残骸）
 python_investment/

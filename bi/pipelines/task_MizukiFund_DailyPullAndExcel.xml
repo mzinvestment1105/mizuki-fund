@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Mizuki Fund: pull from GitHub and convert parquet to Excel.</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <!-- Daily at 22:05 -->
+    <CalendarTrigger>
+      <StartBoundary>2026-04-02T22:05:00</StartBoundary>
+      <Enabled>true</Enabled>
+      <ScheduleByDay>
+        <DaysInterval>1</DaysInterval>
+      </ScheduleByDay>
+    </CalendarTrigger>
+    <!-- Run on user logon -->
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+    </LogonTrigger>
+    <!-- Run on system boot -->
+    <BootTrigger>
+      <Enabled>true</Enabled>
+    </BootTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>mizuk</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <!-- Run asap if missed -->
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <WakeToRun>true</WakeToRun>
+    <ExecutionTimeLimit>PT2H</ExecutionTimeLimit>
+    <Priority>0</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>powershell.exe</Command>
+      <Arguments>-NoProfile -ExecutionPolicy Bypass -File "C:\Users\mizuk\2026年 investment\Mizuki Fund\bi\pipelines\run_daily_pull_and_excel.ps1"</Arguments>
+      <WorkingDirectory>C:\Users\mizuk\2026年 investment\Mizuki Fund</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+

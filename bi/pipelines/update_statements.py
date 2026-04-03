@@ -28,7 +28,10 @@
 
 期末発行済株数 (ShOutFY): 開示が最も新しい行から取得。
 
+現金同等物・純資産（金額）: 直近通期（今年実績と同一会計年度末）の代表行から CashEq・Eq / NCEq。
+
 売上・営業利益・純利益（最終益=NP）: 各 昨年実績 / 今年実績 / 予想（1 列は上記予想の 1 行から）。
+一昨年実績: 決算書類ベースの会計年度末が 3 期分以上あるとき、その 3 番目に新しい年度の実績。
 """
 
 from __future__ import annotations
@@ -50,6 +53,11 @@ STATEMENT_NUMERIC_COLS: list[str] = [
     "Profit_PriorYear_Actual",
     "Profit_LatestYear_Actual",
     "Profit_NextYear_Forecast",
+    "NetSales_TwoYearsPrior_Actual",
+    "OperatingProfit_TwoYearsPrior_Actual",
+    "Profit_TwoYearsPrior_Actual",
+    "CashAndEquivalents_LatestFY",
+    "Equity_LatestFY",
     "EquityToAssetRatio",
     "NumberOfIssuedAndOutstandingSharesAtTheEndOfFiscalYearIncludingTreasuryStock",
 ]
@@ -707,6 +715,8 @@ def aggregate_fins_summary_df(
 
     if "CurPerType" not in work.columns:
         out["EquityToAssetRatio"] = _first_numeric_from_sources(work, ["EqAR", "NCEqAR"])
+        out["CashAndEquivalents_LatestFY"] = _first_numeric_from_sources(work, ["CashEq"])
+        out["Equity_LatestFY"] = _first_numeric_from_sources(work, ["Eq", "NCEq"])
         out["NumberOfIssuedAndOutstandingSharesAtTheEndOfFiscalYearIncludingTreasuryStock"] = (
             _first_numeric_from_sources(work, ["ShOutFY"])
         )
@@ -719,6 +729,8 @@ def aggregate_fins_summary_df(
     w_one = _financial_rows_one_per_fye(work)
     if w_one is None or w_one.empty:
         out["EquityToAssetRatio"] = _first_numeric_from_sources(work, ["EqAR", "NCEqAR"])
+        out["CashAndEquivalents_LatestFY"] = _first_numeric_from_sources(work, ["CashEq"])
+        out["Equity_LatestFY"] = _first_numeric_from_sources(work, ["Eq", "NCEq"])
         out["NumberOfIssuedAndOutstandingSharesAtTheEndOfFiscalYearIncludingTreasuryStock"] = (
             _first_numeric_from_sources(work, ["ShOutFY"])
         )
@@ -750,6 +762,12 @@ def aggregate_fins_summary_df(
         fye_py = fyes[-2] if len(fyes) >= 2 else pd.NaT
         fye_cy = fyes[-1] if len(fyes) >= 1 else pd.NaT
 
+    if len(fyes_fs) >= 3:
+        fye_ppy = fyes_fs[-3]
+    else:
+        _fall = sorted(w_one["_fye"].dropna().unique())
+        fye_ppy = _fall[-3] if len(_fall) >= 3 else pd.NaT
+
     r_py_o, r_cy_o = _row_for_fye(fye_py), _row_for_fye(fye_cy)
     r_py_p, r_cy_p = r_py_o, r_cy_o
 
@@ -766,9 +784,28 @@ def aggregate_fins_summary_df(
     out["Profit_PriorYear_Actual"] = _val_from_row(r_py_p, ["NP"], ["NCNP"])
     out["Profit_LatestYear_Actual"] = _val_from_row(r_cy_p, ["NP"], ["NCNP"])
 
+    r_ppy_o = _row_for_fye(fye_ppy)
+    r_ppy_p = r_ppy_o
+    out["NetSales_TwoYearsPrior_Actual"] = _net_sales_for_fiscal_year(
+        work, fye_ppy, sort_keys, primary_row=r_ppy_o
+    )
+    out["OperatingProfit_TwoYearsPrior_Actual"] = _val_from_row(r_ppy_o, ["OP"], ["NCOP"])
+    out["Profit_TwoYearsPrior_Actual"] = _val_from_row(r_ppy_p, ["NP"], ["NCNP"])
+
     _apply_forecasts_from_newest_disclosure_row_only(out, work, fye_py=fye_py, fye_cy=fye_cy, sort_keys=sort_keys)
 
     r_cy_eq = _row_for_fye(fye_cy)
+    out["CashAndEquivalents_LatestFY"] = _val_from_row(r_cy_eq, ["CashEq"], ["CashEq"])
+    if pd.isna(out["CashAndEquivalents_LatestFY"]):
+        out["CashAndEquivalents_LatestFY"] = _first_numeric_from_sources(w_one, ["CashEq"])
+    if pd.isna(out["CashAndEquivalents_LatestFY"]):
+        out["CashAndEquivalents_LatestFY"] = _first_numeric_from_sources(work, ["CashEq"])
+    out["Equity_LatestFY"] = _val_from_row(r_cy_eq, ["Eq"], ["NCEq"])
+    if pd.isna(out["Equity_LatestFY"]):
+        out["Equity_LatestFY"] = _first_numeric_from_sources(w_one, ["Eq", "NCEq"])
+    if pd.isna(out["Equity_LatestFY"]):
+        out["Equity_LatestFY"] = _first_numeric_from_sources(work, ["Eq", "NCEq"])
+
     out["EquityToAssetRatio"] = _val_from_row(r_cy_eq, ["EqAR"], ["NCEqAR"])
     if pd.isna(out["EquityToAssetRatio"]):
         out["EquityToAssetRatio"] = _first_numeric_from_sources(w_one, ["EqAR", "NCEqAR"])

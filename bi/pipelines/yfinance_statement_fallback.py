@@ -135,6 +135,12 @@ def build_statement_dict_from_yfinance(code4: str) -> dict[str, Any] | None:
         out["_yf_prior_from_c1_OP"] = _v(c1, op_key)
         out["_yf_prior_from_c1_NP"] = _v(c1, ni_key)
 
+    if len(cols) >= 3:
+        c2 = inc[cols[2]]
+        out["NetSales_TwoYearsPrior_Actual"] = _v(c2, rev_key)
+        out["OperatingProfit_TwoYearsPrior_Actual"] = _v(c2, op_key)
+        out["Profit_TwoYearsPrior_Actual"] = _v(c2, ni_key)
+
     # c0 の会計年度末日を記録（merge でアライメント判定に使う）
     out["_yf_fy_date_0"] = pd.Timestamp(cols[0]) if pd.notna(cols[0]) else pd.NaT
 
@@ -156,6 +162,20 @@ def build_statement_dict_from_yfinance(code4: str) -> dict[str, Any] | None:
                 ta = pd.to_numeric(bc.loc[ta_key], errors="coerce")
                 if pd.notna(eq) and pd.notna(ta) and float(ta) != 0:
                     out["EquityToAssetRatio"] = float(eq) / float(ta)
+                if pd.notna(eq):
+                    out["Equity_LatestFY"] = float(eq)
+            cash_key = _pick_row(
+                bal,
+                (
+                    "Cash And Cash Equivalents",
+                    "Cash Cash Equivalents And Short Term Investments",
+                    "CashAndCashEquivalents",
+                ),
+            )
+            if cash_key:
+                cash_v = pd.to_numeric(bc.loc[cash_key], errors="coerce")
+                if pd.notna(cash_v):
+                    out["CashAndEquivalents_LatestFY"] = float(cash_v)
     except Exception:
         pass
 
@@ -226,6 +246,14 @@ def merge_jquants_with_yfinance_thin(
         "EquityToAssetRatio",
         "NumberOfIssuedAndOutstandingSharesAtTheEndOfFiscalYearIncludingTreasuryStock",
     ]
+    # J-Quants で既に埋まっている値は上書きしない（連結基準の差を避ける）
+    yf_supplement_if_jq_na = [
+        "NetSales_TwoYearsPrior_Actual",
+        "OperatingProfit_TwoYearsPrior_Actual",
+        "Profit_TwoYearsPrior_Actual",
+        "CashAndEquivalents_LatestFY",
+        "Equity_LatestFY",
+    ]
     forecast_keys = [
         "NetSales_NextYear_Forecast",
         "OperatingProfit_NextYear_Forecast",
@@ -263,6 +291,11 @@ def merge_jquants_with_yfinance_thin(
         if prefer_yahoo_actuals and pd.notna(yv):
             out[k] = yv
         elif pd.isna(jv) and pd.notna(yv):
+            out[k] = yv
+    for k in yf_supplement_if_jq_na:
+        yv = yahoo.get(k)
+        jv = out.get(k)
+        if pd.isna(jv) and pd.notna(yv):
             out[k] = yv
     for k in forecast_keys:
         if k in out and pd.isna(out[k]):

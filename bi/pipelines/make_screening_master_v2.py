@@ -767,6 +767,15 @@ def main() -> None:
         master["AnnouncementDate"] = master["AnnouncementDate"].fillna(master["StatementDisclosedDate"])
     # helper column is not part of final output; it will be ignored by required_final_cols
     master["MarketCap"] = pd.to_numeric(master["MarketCap"], errors="coerce")
+    _mc_val = master["MarketCap"]
+    _np_lt = pd.to_numeric(master["Profit_LatestYear_Actual"], errors="coerce")
+    _eq_lt = pd.to_numeric(master["Equity_LatestFY"], errors="coerce")
+    _ok_per = _np_lt.notna() & (_np_lt > 0) & _mc_val.notna()
+    _ok_pbr = _eq_lt.notna() & (_eq_lt > 0) & _mc_val.notna()
+    _ok_roe = _eq_lt.notna() & (_eq_lt != 0) & _np_lt.notna()
+    master["PER_Trailing"] = (_mc_val / _np_lt).where(_ok_per)
+    master["PBR_Trailing"] = (_mc_val / _eq_lt).where(_ok_pbr)
+    master["ROE_LatestYear"] = (_np_lt / _eq_lt).where(_ok_roe)
     # 出力監査用: このデータがいつの ETL 実行で作られたかを全行に明示
     master["ETLRunId"] = etl_run_id
     master["ETLStartedAtUTC"] = etl_started_at_utc_str
@@ -794,6 +803,14 @@ def main() -> None:
         "Profit_PriorYear_Actual",
         "Profit_LatestYear_Actual",
         "Profit_NextYear_Forecast",
+        "NetSales_TwoYearsPrior_Actual",
+        "OperatingProfit_TwoYearsPrior_Actual",
+        "Profit_TwoYearsPrior_Actual",
+        "CashAndEquivalents_LatestFY",
+        "Equity_LatestFY",
+        "PER_Trailing",
+        "PBR_Trailing",
+        "ROE_LatestYear",
         "EquityToAssetRatio",
         "NumberOfIssuedAndOutstandingSharesAtTheEndOfFiscalYearIncludingTreasuryStock",
         "ShortMarginTradeVolume",
