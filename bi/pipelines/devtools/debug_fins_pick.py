@@ -4,7 +4,7 @@ the aggregated statement outputs (no full ETL).
 
 Usage (PowerShell):
   cd bi/pipelines
-  python .\\debug_fins_pick.py --codes 1332 1301 130A 7203 7256
+  cd bi/pipelines && python .\\devtools\\debug_fins_pick.py --codes 1332 1301 130A 7203 7256
 """
 
 from __future__ import annotations

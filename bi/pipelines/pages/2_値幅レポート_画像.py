@@ -43,7 +43,7 @@ if not st.session_state.get("_mover_deps_ok"):
     try:
         import openai  # noqa: F401
     except ImportError:
-        st.error("依存パッケージが不足しています。`pip install -r requirements-movers.txt` を実行してください。")
+        st.error("依存パッケージが不足しています。`bi/pipelines` で `pip install -r requirements.txt` を実行してください。")
         st.stop()
     st.session_state["_mover_deps_ok"] = True
 

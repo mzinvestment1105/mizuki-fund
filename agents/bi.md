@@ -13,7 +13,7 @@ Mizuki Fundのデータ基盤を担う。外部APIからのデータ取得（ETL
 ## 管理するデータソース
 | データソース | 取得内容 | パイプライン | ステータス |
 |-------------|---------|-------------|-----------|
-| JQuants API | 日本株の株価・財務・銘柄情報 | bi/pipelines/jquants/ | 既存 |
+| JQuants API | 日本株の株価・財務・銘柄情報 | `make_screening_master_v2.py` 等 `bi/pipelines/*.py` | 既存 |
 | | | | |
 
 ## 参照すべきファイル
@@ -25,8 +25,8 @@ Mizuki Fundのデータ基盤を担う。外部APIからのデータ取得（ETL
 - `bi/data_catalog.md` - データカタログ（自身が管理）
 
 ## 出力先
-- `bi/outputs/` - 加工済みデータ・スクリーニング結果（他エージェントが参照）
-- `bi/pipelines/` - ETLスクリプト・パイプラインコード
+- `bi/outputs/` - 加工済みデータ・スクリーニング結果（他エージェントが参照）。Git 上は主要ファイルのみ追跡（詳細は `bi/data_catalog.md` と `.gitignore`）
+- `bi/pipelines/` - ETLスクリプト・パイプラインコード（直下が本番、`ops/` が定期実行用 PowerShell、`devtools/` がデバッグ用）
 - `bi/configs/` - API設定・パイプライン設定
 - `bi/data_catalog.md` - データカタログの更新
 

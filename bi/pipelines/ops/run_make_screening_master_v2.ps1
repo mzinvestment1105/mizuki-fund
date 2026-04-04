@@ -5,10 +5,11 @@ $ErrorActionPreference = "Stop"
 $OutputEncoding = [System.Text.Encoding]::UTF8
 $env:PYTHONIOENCODING = "utf-8"
 
-$here = Split-Path -Parent $MyInvocation.MyCommand.Path
-Set-Location $here
+$opsDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$pipelineRoot = Split-Path -Parent $opsDir
+Set-Location $pipelineRoot
 
-$envFile = Join-Path $here ".env"
+$envFile = Join-Path $pipelineRoot ".env"
 if (Test-Path $envFile) {
   Get-Content $envFile | ForEach-Object {
     $line = $_.Trim()

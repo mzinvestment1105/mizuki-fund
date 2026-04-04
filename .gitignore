@@ -12,12 +12,19 @@ bi/data/raw/
 bi/data/universe/
 bi/data/processed/
 
-# 生成物（出力データはGitに残さない）
+# 生成物: 既定では Git 対象外（巨大ファイルの誤コミット防止）
+# ※ GitHub Actions が master に載せる成果物だけ否定パターンで追跡可能にする
 bi/outputs/*.parquet
 bi/outputs/*.xlsx
+!bi/outputs/screening_master.parquet
+!bi/outputs/screening_master.xlsx
+!bi/outputs/screening_master_data_gaps.parquet
+!bi/outputs/screening_master_data_gaps.xlsx
+!bi/outputs/yfinance_audit.parquet
+!bi/outputs/yfinance_audit.xlsx
 bi/outputs/notion_sync_state.json
 
-# 清算物（将来削除予定の作業残骸）
+# 旧ローカル作業の残骸（リポジトリには含めない。必要なら bi/pipelines を利用）
 python_investment/
 
 # 生成されたミラー/作業ディレクトリ

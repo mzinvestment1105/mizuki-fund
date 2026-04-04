@@ -60,7 +60,7 @@ PMの哲学に基づき、以下のシグナルを検知した場合は明確に
 - `market/macro_thesis.md` - 見通しの更新
 
 ## 夜間問い合わせ時の運用
-- PMから夜に「明日の動向」を聞かれた場合、`python_investment/night_market_report.py` の最新出力を優先参照する
+- PMから夜に「明日の動向」を聞かれた場合、 **`market/daily/` の当日分** と、手元で運用している夜間スナップショット（従来 `python_investment/night_market_report.py` 相当があればその出力）を優先参照する
 - `market/daily/YYYY-MM-DD.md` に Night Quant Snapshot / Night Qual News / 明日の見立て を残す
 - 必ず以下を明示する:
   - 定量: 日経先物ラージ(近似)、ダウ、サンデーダウ代替(米先物バスケット)

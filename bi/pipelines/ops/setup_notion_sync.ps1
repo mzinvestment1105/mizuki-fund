@@ -4,10 +4,11 @@ $ErrorActionPreference = "Stop"
 $OutputEncoding = [System.Text.Encoding]::UTF8
 $env:PYTHONIOENCODING = "utf-8"
 
-$here = Split-Path -Parent $MyInvocation.MyCommand.Path
-Set-Location $here
+$opsDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$pipelineRoot = Split-Path -Parent $opsDir
+Set-Location $pipelineRoot
 
-$envFile = Join-Path $here ".env"
+$envFile = Join-Path $pipelineRoot ".env"
 
 if (-not (Test-Path $envFile)) {
   New-Item -ItemType File -Path $envFile -Force | Out-Null
@@ -62,4 +63,4 @@ Set-Or-AppendEnvValue -Key "NOTION_INITIAL_DAYS" -Value $initialDays.Trim()
 Write-Host ""
 Write-Host ".env を更新しました: $envFile" -ForegroundColor Green
 Write-Host "次のコマンドで差分同期を実行できます:" -ForegroundColor DarkGray
-Write-Host "  powershell -ExecutionPolicy Bypass -File .\run_notion_incremental_sync.ps1" -ForegroundColor Yellow
+Write-Host "  powershell -ExecutionPolicy Bypass -File .\ops\run_notion_incremental_sync.ps1" -ForegroundColor Yellow

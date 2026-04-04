@@ -64,7 +64,7 @@ PowerShellで以下を実行します:
 
 ```powershell
 cd "C:\Users\mizuk\2026年 investment\Mizuki Fund\bi\pipelines"
-powershell -ExecutionPolicy Bypass -File .\setup_notion_sync.ps1
+powershell -ExecutionPolicy Bypass -File .\ops\setup_notion_sync.ps1
 ```
 
 対話入力で以下を設定します:
@@ -77,7 +77,7 @@ powershell -ExecutionPolicy Bypass -File .\setup_notion_sync.ps1
 
 ```powershell
 cd "C:\Users\mizuk\2026年 investment\Mizuki Fund\bi\pipelines"
-powershell -ExecutionPolicy Bypass -File .\run_notion_incremental_sync.ps1
+powershell -ExecutionPolicy Bypass -File .\ops\run_notion_incremental_sync.ps1
 ```
 
 成功時は以下が作成・更新されます:

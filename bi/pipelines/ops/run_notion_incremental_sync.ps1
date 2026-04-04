@@ -4,10 +4,11 @@ $ErrorActionPreference = "Stop"
 $OutputEncoding = [System.Text.Encoding]::UTF8
 $env:PYTHONIOENCODING = "utf-8"
 
-$here = Split-Path -Parent $MyInvocation.MyCommand.Path
-Set-Location $here
+$opsDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$pipelineRoot = Split-Path -Parent $opsDir
+Set-Location $pipelineRoot
 
-$envFile = Join-Path $here ".env"
+$envFile = Join-Path $pipelineRoot ".env"
 if (Test-Path $envFile) {
   Get-Content $envFile | ForEach-Object {
     $line = $_.Trim()
@@ -39,6 +40,6 @@ if (-not $env:NOTION_DATABASE_ID -or $env:NOTION_DATABASE_ID.Length -eq 0) {
 Write-Host "== Notion incremental sync (single DB) ==" -ForegroundColor Cyan
 Write-Host ("time: " + (Get-Date).ToString("yyyy-MM-dd HH:mm:ss"))
 
-python (Join-Path $here "notion_incremental_sync.py")
+python (Join-Path $pipelineRoot "notion_incremental_sync.py")
 
 Write-Host "Done." -ForegroundColor Green

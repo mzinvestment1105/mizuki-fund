@@ -1,5 +1,5 @@
-# 値幅スキャン・材料レポート（scan_daily_movers / report_mover_reasons / 画像レポート）
-# 既存のダッシュボード用とは別インストール可: pip install -r requirements-movers.txt
+# 値幅スキャン・材料レポート・スクリーニングマスタ・ダッシュボード共通
+# （この 1 ファイルでインストール。別ファイルの requirements-movers は廃止）
 #
 # 注意: pip で入れる名前は jquants-api-client（ハイフン付き）。
 # コード側は import jquantsapi のまま（公式クライアントの仕様）。
@@ -12,7 +12,7 @@ pandas>=2.0.0
 pyarrow>=14.0.0
 openpyxl>=3.1.0
 requests>=2.31.0
-openai>=1.40.0
+# openai>=1.40.0  # deep_dive は Claude で代替（devtools/archive/deep_dive_openai.py 参照）
 python-dotenv>=1.0.0
 pdfminer.six>=20221105
 
