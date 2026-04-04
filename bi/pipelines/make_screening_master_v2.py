@@ -521,9 +521,9 @@ def main() -> None:
         ann_df = ann_df.drop_duplicates("Code", keep="last")
 
     # 4) weekly_margin_interest (v2: markets/margin-interest)
-    # 直近の金曜を優先し、S/T が欠ける銘柄はさらに前の金曜で補完（combine_first）
-    # デフォルトは時間と欠損のバランス（週4・最大3日さかのぼり）。短縮: 3/1、最大: 8/4 など環境変数で。
-    margin_weeks = max(1, int(os.environ.get("MARGIN_INTEREST_LOOKBACK_WEEKS", "4")))
+    # 直近金曜を週次アンカーに、欠損は当日から最大 N 日さかのぼり。
+    # デフォルト 8 週 ≒2 か月分の買残履歴（playbook: トレンド確認用）。MARGIN_INTEREST_LOOKBACK_WEEKS で変更可。
+    margin_weeks = max(1, int(os.environ.get("MARGIN_INTEREST_LOOKBACK_WEEKS", "8")))
     margin_day_fallback = max(0, int(os.environ.get("MARGIN_INTEREST_DAY_FALLBACK", "2")))
     margin_verbose = os.environ.get("SCREENING_VERBOSE_MARGIN", "").strip().lower() in ("1", "true", "yes")
     print(
@@ -537,7 +537,8 @@ def main() -> None:
         fridays.append(d_fr)
         d_fr = d_fr - timedelta(days=7)
 
-    wm_df = pd.DataFrame(columns=["Code", "ShortMarginTradeVolume", "LongMarginTradeVolume"])
+    # 週ごとのデータを収集し、後でピボット（W1=最新〜WN=N週前）
+    wm_all_weeks: list[pd.DataFrame] = []
     for i, frd in enumerate(fridays):
         # 週次の基準日は「通常金曜」だが祝日等で空の週がある → 同一週内で最大N日さかのぼって取得
         wm_rows: list[dict[str, Any]] = []
@@ -604,7 +605,6 @@ def main() -> None:
         chunk["Code"] = chunk["CodeRaw"].map(_normalize_code_4).astype(str)
         chunk = chunk[["Code", "ShortMarginTradeVolume", "LongMarginTradeVolume"]].copy()
         if not did_iss_dedup:
-            # IssType がない場合でも、4桁正規化後に「非ゼロ・非欠損」を優先して1行に寄せる
             pass
         s_num = pd.to_numeric(chunk["ShortMarginTradeVolume"], errors="coerce")
         l_num = pd.to_numeric(chunk["LongMarginTradeVolume"], errors="coerce")
@@ -622,21 +622,53 @@ def main() -> None:
             .drop_duplicates("Code", keep="first")
             .drop(columns=["_vol_score", "_vol_abs"])
         )
-        if wm_df.empty:
-            wm_df = chunk
-        else:
-            wm_df = wm_df.set_index("Code")
-            chunk = chunk.set_index("Code")
-            wm_df = wm_df.combine_first(chunk)
-            wm_df = wm_df.reset_index()
+        chunk["_week_idx"] = i  # 0=最新週（直近金曜系）, 1=1週前, ...
+        wm_all_weeks.append(chunk)
 
-    if not wm_df.empty:
-        wm_df = wm_df.drop_duplicates(subset=["Code"], keep="first")
+    # 週次を結合: Short は各 Code の最新週（最小 _week_idx）行。Long は 8 週分を列展開
+    # LongMargin_WkSeq01=最古 … WkSeq08=直近（week_idx 0）。欠損週は NA。
+    wm_df = pd.DataFrame(columns=["Code", "ShortMarginTradeVolume", "LongMarginTradeVolume"])
+    if wm_all_weeks:
+        all_long = pd.concat(wm_all_weeks, ignore_index=True)
+
+        idx_latest = all_long.groupby("Code", sort=False)["_week_idx"].idxmin()
+        latest = (
+            all_long.loc[idx_latest, ["Code", "ShortMarginTradeVolume", "LongMarginTradeVolume"]]
+            .drop_duplicates("Code")
+            .reset_index(drop=True)
+        )
+
+        _pivot_src = all_long[["Code", "_week_idx", "LongMarginTradeVolume"]].drop_duplicates(
+            ["Code", "_week_idx"]
+        )
+        pivot = _pivot_src.pivot(
+            index="Code", columns="_week_idx", values="LongMarginTradeVolume"
+        )
+        pivot = pivot.reset_index()
+
+        wm_df = latest[["Code", "ShortMarginTradeVolume"]].copy()
+        long_seq_cols: list[str] = []
+        for seq in range(1, margin_weeks + 1):
+            wi = margin_weeks - seq
+            col = f"LongMargin_WkSeq{seq:02d}"
+            long_seq_cols.append(col)
+            if wi in pivot.columns:
+                sub = pivot[["Code", wi]].rename(columns={wi: col})
+                wm_df = wm_df.merge(sub, on="Code", how="outer")
+            else:
+                wm_df[col] = pd.NA
+
+        _seq08 = "LongMargin_WkSeq08"
+        _fb = latest.set_index("Code")["LongMarginTradeVolume"]
+        wm_df["LongMarginTradeVolume"] = pd.to_numeric(wm_df[_seq08], errors="coerce")
+        wm_df["LongMarginTradeVolume"] = wm_df["LongMarginTradeVolume"].fillna(wm_df["Code"].map(_fb))
+
         _s = wm_df["ShortMarginTradeVolume"].notna().sum()
         _l = wm_df["LongMarginTradeVolume"].notna().sum()
+        n_weeks_got = len(wm_all_weeks)
         print(
-            f"margin_interest 集計後: rows={len(wm_df)} "
-            f"Short非欠損={int(_s)} Long非欠損={int(_l)}"
+            f"margin_interest 集計後: rows={len(wm_df)} weeks_fetched={n_weeks_got} "
+            f"Short非欠損={int(_s)} Long非欠損={int(_l)} (買残8週列: {long_seq_cols})"
         )
         if not universe_df.empty:
             uc = set(universe_df["Code"].astype(str))
@@ -751,6 +783,7 @@ def main() -> None:
         print(f"yfinance: MarketCap 取得 {_n_m}/{len(codes)} 株数 {_n_s}/{len(codes)}")
 
     master = master.merge(wm_df, on="Code", how="left")
+
     master = master.merge(ss_df, on="Code", how="left")
     # 合算空売り株数 ÷ 期末発行済株式数 で比率を一貫させる（機関別比率の max は合算と整合しないため）
     if sh_out in master.columns and "ShortPositionsInSharesNumber" in master.columns:
@@ -815,6 +848,14 @@ def main() -> None:
         "NumberOfIssuedAndOutstandingSharesAtTheEndOfFiscalYearIncludingTreasuryStock",
         "ShortMarginTradeVolume",
         "LongMarginTradeVolume",
+        "LongMargin_WkSeq01",
+        "LongMargin_WkSeq02",
+        "LongMargin_WkSeq03",
+        "LongMargin_WkSeq04",
+        "LongMargin_WkSeq05",
+        "LongMargin_WkSeq06",
+        "LongMargin_WkSeq07",
+        "LongMargin_WkSeq08",
         "DiscretionaryInvestmentContractorName",
         "ShortPositionsToSharesOutstandingRatio",
         "ShortPositionsInSharesNumber",

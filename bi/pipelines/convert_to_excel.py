@@ -1,4 +1,4 @@
-"""screening_master parquet → Excel（列の一部削除・日本語ヘッダ）"""
+"""screening_master parquet → Excel（列の一部削除・日本語ヘッダ・スクリーニングシート）"""
 
 from __future__ import annotations
 
@@ -11,13 +11,22 @@ import pandas as pd
 try:
     from openpyxl.utils import get_column_letter
     from openpyxl import load_workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.worksheet.table import Table, TableStyleInfo
 
     _HAVE_OPENPYXL = True
 except ImportError:  # pragma: no cover
     _HAVE_OPENPYXL = False
+    Table = None  # type: ignore[misc, assignment]
+    TableStyleInfo = None  # type: ignore[misc, assignment]
 
 INPUT_PATH = Path("..") / "outputs" / "screening_master.parquet"
 OUTPUT_PATH = Path("..") / "outputs" / "screening_master.xlsx"
+
+DATA_SHEET = "データ"
+COND_SHEET = "スクリーニング条件"
+RESULT_SHEET = "スクリーニング結果"
+TABLE_NAME = "ScrMaster"
 
 DROP_COLS = [
     "DiscretionaryInvestmentContractorName",
@@ -56,6 +65,14 @@ JP_HEADERS: dict[str, str] = {
     "NumberOfIssuedAndOutstandingSharesAtTheEndOfFiscalYearIncludingTreasuryStock": "期末発行株式数（自己株含む）",
     "ShortMarginTradeVolume": "信用売り残",
     "LongMarginTradeVolume": "信用買い残",
+    "LongMargin_WkSeq01": "信用買い残_週次01_最古",
+    "LongMargin_WkSeq02": "信用買い残_週次02",
+    "LongMargin_WkSeq03": "信用買い残_週次03",
+    "LongMargin_WkSeq04": "信用買い残_週次04",
+    "LongMargin_WkSeq05": "信用買い残_週次05",
+    "LongMargin_WkSeq06": "信用買い残_週次06",
+    "LongMargin_WkSeq07": "信用買い残_週次07",
+    "LongMargin_WkSeq08": "信用買い残_週次08_直近",
     "AvgDailyVolume5d": "出来高_5日平均",
     "ShortPositionsInSharesNumber": "空売り残高（株数）",
     "AnnouncementDate": "決算発表予定日",
@@ -66,25 +83,122 @@ JP_HEADERS: dict[str, str] = {
     "ETLStartedAtJST": "ETL開始時刻(JST)",
 }
 
+# スクリーニング用派生（parquet には含めず Excel のみ）。
+# 信用は playbook 準拠: 買残/発行株・買残/出来高を主とする。
+DERIVED_JP_HEADERS: dict[str, str] = {
+    "Scr_LongMargin_to_SharesOutstanding": "信用買残_発行済株数比",
+    "Scr_LongMargin_to_AvgVol5d": "信用買残_出来高5日比",
+    "Scr_InstShort_to_Mcap": "機関空売り_時価総額比",
+    "Scr_Sales_CAGR2y": "売上高_CAGR2年",
+    "Scr_OP_CAGR2y": "営業利益_CAGR2年",
+    "Scr_NI_CAGR2y": "最終益_CAGR2年",
+    "Scr_Sales_FcstGrowth": "売上高_予想対実績伸び率",
+    "Scr_OP_FcstGrowth": "営業利益_予想対実績伸び率",
+    "Scr_NI_FcstGrowth": "最終益_予想対実績伸び率",
+    "Scr_Cash_to_Mcap": "現金同等物_時価総額比",
+}
+
+# スクリーニング条件シートの行順（Data シートの日本語列名と一致）
+SCREENING_TABLE_COLUMNS: list[tuple[str, str]] = [
+    ("時価総額", "円。下限のみ例:  large cap 向けに 300000000000 など"),
+    ("信用買残_発行済株数比", "買残÷期末発行済株数（playbook ①）"),
+    ("信用買残_出来高5日比", "買残÷5日平均出来高＝解消日数目安（playbook ②）"),
+    ("機関空売り_時価総額比", "空売り残株×終値÷時価総額"),
+    ("売上高_CAGR2年", "一昨年→今年実績の2年CAGR=(今年/一昨年)^0.5-1。正の実績のみ"),
+    ("営業利益_CAGR2年", "同上（営業利益）"),
+    ("最終益_CAGR2年", "同上（最終益）"),
+    ("売上高_予想対実績伸び率", "来年予想÷今年実績-1（予想欠損行は計算されません）"),
+    ("営業利益_予想対実績伸び率", "同上"),
+    ("最終益_予想対実績伸び率", "同上"),
+    ("自己資本比率", "小数で入力（例 0.35 = 35%）。データと同じ基準"),
+    ("現金同等物_時価総額比", "現金同等物÷時価総額"),
+]
+
+HEADER_FONT = Font(bold=True, color="FFFFFFFF", size=11)
+HEADER_FILL = PatternFill(fill_type="solid", fgColor="FF000000", bgColor="FF000000")
+HEADER_ALIGN = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+
+def _add_screening_derived_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """スクリーニング用の派生列を英語キーで追加（続けて JP へリネーム）。"""
+    out = df.copy()
+    close = pd.to_numeric(out.get("Close"), errors="coerce")
+    mcap = pd.to_numeric(out.get("MarketCap"), errors="coerce")
+    lm = pd.to_numeric(out.get("LongMarginTradeVolume"), errors="coerce")
+    av5 = pd.to_numeric(out.get("AvgDailyVolume5d"), errors="coerce")
+    inst = pd.to_numeric(out.get("ShortPositionsInSharesNumber"), errors="coerce")
+    cash = pd.to_numeric(out.get("CashAndEquivalents_LatestFY"), errors="coerce")
+
+    inst_yen = inst * close
+    sh_out = pd.to_numeric(
+        out.get("NumberOfIssuedAndOutstandingSharesAtTheEndOfFiscalYearIncludingTreasuryStock"),
+        errors="coerce",
+    )
+    out["Scr_LongMargin_to_SharesOutstanding"] = lm / sh_out
+    out["Scr_LongMargin_to_AvgVol5d"] = lm / av5
+    out["Scr_InstShort_to_Mcap"] = inst_yen / mcap
+    out["Scr_Cash_to_Mcap"] = cash / mcap
+
+    def _cagr2(a0: pd.Series, a1: pd.Series) -> pd.Series:
+        s0 = pd.to_numeric(a0, errors="coerce")
+        s1 = pd.to_numeric(a1, errors="coerce")
+        ratio = s1 / s0
+        ok = s0.notna() & s1.notna() & (s0 > 0) & (s1 > 0)
+        r = pd.Series(pd.NA, index=out.index, dtype="Float64")
+        r.loc[ok] = ratio[ok].pow(0.5) - 1.0
+        return r
+
+    out["Scr_Sales_CAGR2y"] = _cagr2(
+        out.get("NetSales_TwoYearsPrior_Actual"),
+        out.get("NetSales_LatestYear_Actual"),
+    )
+    out["Scr_OP_CAGR2y"] = _cagr2(
+        out.get("OperatingProfit_TwoYearsPrior_Actual"),
+        out.get("OperatingProfit_LatestYear_Actual"),
+    )
+    out["Scr_NI_CAGR2y"] = _cagr2(
+        out.get("Profit_TwoYearsPrior_Actual"),
+        out.get("Profit_LatestYear_Actual"),
+    )
+
+    def _fcst_growth(f: pd.Series, a: pd.Series) -> pd.Series:
+        ff = pd.to_numeric(f, errors="coerce")
+        aa = pd.to_numeric(a, errors="coerce")
+        ok = ff.notna() & aa.notna() & (aa != 0)
+        r = pd.Series(pd.NA, index=out.index, dtype="Float64")
+        r.loc[ok] = (ff[ok] / aa[ok]) - 1.0
+        return r
+
+    out["Scr_Sales_FcstGrowth"] = _fcst_growth(
+        out.get("NetSales_NextYear_Forecast"),
+        out.get("NetSales_LatestYear_Actual"),
+    )
+    out["Scr_OP_FcstGrowth"] = _fcst_growth(
+        out.get("OperatingProfit_NextYear_Forecast"),
+        out.get("OperatingProfit_LatestYear_Actual"),
+    )
+    out["Scr_NI_FcstGrowth"] = _fcst_growth(
+        out.get("Profit_NextYear_Forecast"),
+        out.get("Profit_LatestYear_Actual"),
+    )
+    return out
+
+
 # Excel 表示用（科学記数法・#### 緩和）
-# #,##0 はロケールの千桁区切り（日本語環境ではカンマ）
 _NUM_FMT_INT = "#,##0"
 _NUM_FMT_FLOAT = "#,##0.00"
-# セル値は 0〜1（例: 0.352 → 35.20%）。既に 35.2 のような百分率の数値は 100 で割ってから保存する。
 _NUM_FMT_PERCENT = "0.00%"
 _MIN_WIDTH_BY_JP_HEADER: dict[str, float] = {
     "決算発表予定日": 14,
     "会計年度": 12,
     "銘柄名": 28,
 }
-# 大金額・カンマ付きで #### にならないよう最低幅（文字相当）
 _MIN_WIDTH_NUMERIC = 14
 _MIN_WIDTH_MONEY = 16
 _MAX_COL_WIDTH = 55
 
 
 def _estimate_display_chars(v: object, *, prefer_float: bool = False) -> int:
-    """セル表示のおおよその文字数（列幅の目安）。千桁カンマ付きを想定。"""
     if v is None or v == "":
         return 0
     if isinstance(v, bool):
@@ -96,7 +210,7 @@ def _estimate_display_chars(v: object, *, prefer_float: bool = False) -> int:
     if isinstance(v, (int, float)):
         try:
             fv = float(v)
-            if fv != fv:  # nan
+            if fv != fv:
                 return 0
             if abs(fv) >= 1e15:
                 return 14
@@ -109,12 +223,11 @@ def _estimate_display_chars(v: object, *, prefer_float: bool = False) -> int:
 
 
 def _equity_ratio_as_excel_fraction(raw: object) -> float | None:
-    """自己資本比率を Excel の % 書式用（0〜1）にそろえる。"""
     try:
         fv = float(raw)
     except (TypeError, ValueError):
         return None
-    if fv != fv:  # nan
+    if fv != fv:
         return None
     if fv > 1.0 + 1e-6:
         return fv / 100.0
@@ -128,17 +241,29 @@ def _estimate_percent_display_chars(v: object) -> int:
     return max(len(f"{fr * 100:.2f}%"), 7)
 
 
-def _apply_excel_display_formats(path: Path, header_row: int = 1) -> None:
-    """openpyxl で列幅・数値書式を付与（to_excel 直後のシートを想定）。"""
+def _style_header_row(ws, header_row: int = 1) -> None:
+    for col_idx in range(1, ws.max_column + 1):
+        c = ws.cell(header_row, col_idx)
+        if c.value is not None:
+            c.font = HEADER_FONT
+            c.fill = HEADER_FILL
+            c.alignment = HEADER_ALIGN
+
+
+def _apply_excel_display_formats_workbook(path: Path, *, header_row: int = 1) -> None:
+    """データシートに数値書式・列幅。ヘッダは黒背景・白太字。"""
     if not _HAVE_OPENPYXL:
         return
     wb = load_workbook(path)
-    ws = wb.active
+    if DATA_SHEET not in wb.sheetnames:
+        wb.save(path)
+        return
+    ws = wb[DATA_SHEET]
     if ws.max_row < header_row or ws.max_column < 1:
         wb.save(path)
         return
 
-    # 1行目固定（ヘッダ固定）
+    _style_header_row(ws, header_row)
     ws.freeze_panes = f"A{header_row + 1}"
 
     headers: dict[str, int] = {}
@@ -169,6 +294,14 @@ def _apply_excel_display_formats(path: Path, header_row: int = 1) -> None:
         "期末発行株式数（自己株含む）",
         "信用売り残",
         "信用買い残",
+        "信用買い残_週次01_最古",
+        "信用買い残_週次02",
+        "信用買い残_週次03",
+        "信用買い残_週次04",
+        "信用買い残_週次05",
+        "信用買い残_週次06",
+        "信用買い残_週次07",
+        "信用買い残_週次08_直近",
         "空売り残高（株数）",
         "出来高_5日平均",
     }
@@ -177,16 +310,34 @@ def _apply_excel_display_formats(path: Path, header_row: int = 1) -> None:
         "PBR_実績ベース",
         "ROE_今期実績",
     }
+    screening_ratio_jp = {
+        "信用買残_発行済株数比",
+        "信用買残_出来高5日比",
+        "機関空売り_時価総額比",
+        "現金同等物_時価総額比",
+    }
+    screening_rate_as_pct_jp = {
+        "売上高_CAGR2年",
+        "営業利益_CAGR2年",
+        "最終益_CAGR2年",
+        "売上高_予想対実績伸び率",
+        "営業利益_予想対実績伸び率",
+        "最終益_予想対実績伸び率",
+    }
 
     for jp, cidx in headers.items():
-        letter = get_column_letter(cidx)
         if jp in money_jp:
             fmt = _NUM_FMT_INT
             for r in range(header_row + 1, ws.max_row + 1):
                 cell = ws.cell(r, cidx)
                 if cell.value is not None and cell.value != "":
                     cell.number_format = fmt
-        elif jp in ratio_metric_jp:
+        elif jp in screening_rate_as_pct_jp:
+            for r in range(header_row + 1, ws.max_row + 1):
+                cell = ws.cell(r, cidx)
+                if cell.value is not None and cell.value != "":
+                    cell.number_format = _NUM_FMT_PERCENT
+        elif jp in ratio_metric_jp or jp in screening_ratio_jp:
             for r in range(header_row + 1, ws.max_row + 1):
                 cell = ws.cell(r, cidx)
                 if cell.value is not None and cell.value != "":
@@ -200,10 +351,8 @@ def _apply_excel_display_formats(path: Path, header_row: int = 1) -> None:
                         cell.value = fr
                     cell.number_format = _NUM_FMT_PERCENT
 
-    # 銘柄コードやIDは整数でもカンマ付けしない（見た目が崩れるため）
     _skip_auto_numeric_headers = {"銘柄コード", "ETL実行ID"}
 
-    # 「全数値カンマ」: 上記以外の数値主体列（日付・テキスト列は除外）
     for cidx in range(1, ws.max_column + 1):
         header_val = ws.cell(header_row, cidx).value
         header_s = str(header_val) if header_val is not None else ""
@@ -211,7 +360,13 @@ def _apply_excel_display_formats(path: Path, header_row: int = 1) -> None:
             continue
         if "日" in header_s or "Date" in header_s or "時刻" in header_s:
             continue
-        if header_s in money_jp or header_s in ratio_metric_jp or header_s == "自己資本比率":
+        if (
+            header_s in money_jp
+            or header_s in ratio_metric_jp
+        or header_s in screening_ratio_jp
+        or header_s in screening_rate_as_pct_jp
+        or header_s == "自己資本比率"
+        ):
             continue
 
         nonnull = 0
@@ -233,14 +388,11 @@ def _apply_excel_display_formats(path: Path, header_row: int = 1) -> None:
                 if isinstance(v, float) and abs(v - int(v)) > 1e-9:
                     any_float = True
             elif isinstance(v, str) and v != "予想無し":
-                # 銘柄名などと混在する列は数値列扱いしない
                 numeric = 0
                 nonnull = 0
                 break
 
-        if nonnull == 0:
-            continue
-        if numeric / nonnull < 0.8:
+        if nonnull == 0 or numeric / nonnull < 0.8:
             continue
 
         fmt = _NUM_FMT_FLOAT if any_float else _NUM_FMT_INT
@@ -251,7 +403,6 @@ def _apply_excel_display_formats(path: Path, header_row: int = 1) -> None:
                     continue
                 cell.number_format = fmt
 
-    # 列幅: 全データ行を走査し #### 回避（ヘッダ長・カンマ付き表示幅の大きい方）
     for jp, cidx in headers.items():
         letter = get_column_letter(cidx)
         hdr_w = len(jp) + 3
@@ -259,11 +410,14 @@ def _apply_excel_display_formats(path: Path, header_row: int = 1) -> None:
         floor = _MIN_WIDTH_BY_JP_HEADER.get(jp, 10)
         if jp in money_jp:
             floor = max(floor, _MIN_WIDTH_MONEY)
-        elif jp in ratio_metric_jp or jp == "自己資本比率":
+        elif jp in ratio_metric_jp or jp in screening_ratio_jp or jp == "自己資本比率":
             floor = max(floor, _MIN_WIDTH_NUMERIC)
+        elif jp in screening_rate_as_pct_jp:
+            floor = max(floor, 12.0)
 
-        prefer_float = jp in ratio_metric_jp
+        prefer_float = jp in ratio_metric_jp or jp in screening_ratio_jp
         is_eq_ratio = jp == "自己資本比率"
+        is_rate_pct = jp in screening_rate_as_pct_jp
 
         for r in range(header_row + 1, ws.max_row + 1):
             v = ws.cell(r, cidx).value
@@ -271,6 +425,12 @@ def _apply_excel_display_formats(path: Path, header_row: int = 1) -> None:
                 continue
             if is_eq_ratio:
                 wch = _estimate_percent_display_chars(v)
+            elif is_rate_pct:
+                try:
+                    fv = float(v)
+                    wch = max(len(f"{fv * 100:.2f}%"), 9) if fv == fv else 0
+                except (TypeError, ValueError):
+                    wch = _estimate_display_chars(v, prefer_float=True)
             else:
                 wch = _estimate_display_chars(v, prefer_float=prefer_float)
             if wch > max_cell:
@@ -279,7 +439,92 @@ def _apply_excel_display_formats(path: Path, header_row: int = 1) -> None:
         target = min(_MAX_COL_WIDTH, max(max_cell + 2, floor, hdr_w))
         ws.column_dimensions[letter].width = float(target)
 
+    _append_table_and_screening_sheets(wb, ws, header_row)
     wb.save(path)
+
+
+def _append_table_and_screening_sheets(wb, data_ws, header_row: int) -> None:
+    """Excel テーブル登録と条件・結果シート（Excel 365 の FILTER 想定）。"""
+    if not _HAVE_OPENPYXL or Table is None:
+        return
+    max_r = data_ws.max_row
+    max_c = data_ws.max_column
+    if max_r < 2 or max_c < 1:
+        return
+    last_letter = get_column_letter(max_c)
+    ref = f"A{header_row}:{last_letter}{max_r}"
+
+    for _tname in list(data_ws.tables):
+        del data_ws.tables[_tname]
+
+    tab = Table(displayName=TABLE_NAME, ref=ref)
+    tab.tableStyleInfo = TableStyleInfo(
+        name="TableStyleMedium2",
+        showFirstColumn=False,
+        showLastColumn=False,
+        showRowStripes=True,
+        showColumnStripes=False,
+    )
+    data_ws.add_table(tab)
+
+    if COND_SHEET in wb.sheetnames:
+        del wb[COND_SHEET]
+    if RESULT_SHEET in wb.sheetnames:
+        del wb[RESULT_SHEET]
+
+    cws = wb.create_sheet(COND_SHEET)
+    cws.merge_cells("A1:D1")
+    c1 = cws["A1"]
+    c1.value = (
+        "↓ 各指標の下限・上限を入力してください（空欄＝その側の制約なし）。"
+        " Microsoft 365 の Excel で「スクリーニング結果」を開いてください。"
+    )
+    c1.alignment = Alignment(wrap_text=True, vertical="top")
+    c1.font = Font(bold=True)
+    cws.row_dimensions[1].height = 36
+
+    for col, title in enumerate(["指標（データ列名）", "下限", "上限", "メモ"], start=1):
+        cell = cws.cell(2, col, title)
+        cell.font = HEADER_FONT
+        cell.fill = HEADER_FILL
+        cell.alignment = HEADER_ALIGN
+    cws.column_dimensions["A"].width = 32
+    cws.column_dimensions["B"].width = 14
+    cws.column_dimensions["C"].width = 14
+    cws.column_dimensions["D"].width = 52
+
+    start_data = 3
+    for i, (col_jp, memo) in enumerate(SCREENING_TABLE_COLUMNS):
+        r = start_data + i
+        cws.cell(r, 1, col_jp)
+        cws.cell(r, 2, None)
+        cws.cell(r, 3, None)
+        cws.cell(r, 4, memo)
+
+    rws = wb.create_sheet(RESULT_SHEET)
+    rws["A1"] = "条件をすべて満たす行（データシートの全列を表示）"
+    rws["A1"].font = Font(bold=True)
+    formula_parts: list[str] = []
+    cond_ref = f"'{COND_SHEET}'"
+    for i, (col_jp, _) in enumerate(SCREENING_TABLE_COLUMNS):
+        r = start_data + i
+        esc = col_jp.replace("'", "''")
+        formula_parts.append(
+            f"(IF(ISBLANK({cond_ref}!$B${r}),TRUE,{TABLE_NAME}[{esc}]>={cond_ref}!$B${r}))"
+        )
+        formula_parts.append(
+            f"(IF(ISBLANK({cond_ref}!$C${r}),TRUE,{TABLE_NAME}[{esc}]<={cond_ref}!$C${r}))"
+        )
+    combined = "*".join(formula_parts)
+    formula = (
+        f'=IFERROR(FILTER({TABLE_NAME},{combined},"該当がありません"),'
+        f'"FILTER未対応: Microsoft 365 の Excel で開いてください")'
+    )
+    rws["A2"] = formula
+    rws.column_dimensions["A"].width = 24
+
+    # 条件シートのヘッダ行の高さ
+    cws.row_dimensions[2].height = 28
 
 
 def parquet_to_excel(
@@ -303,25 +548,27 @@ def parquet_to_excel(
     if drop:
         df = df.drop(columns=drop)
 
+    df = _add_screening_derived_columns(df)
+
     rename = {k: v for k, v in JP_HEADERS.items() if k in df.columns}
+    rename.update({k: v for k, v in DERIVED_JP_HEADERS.items() if k in df.columns})
     df = df.rename(columns=rename)
 
-    # 予想列が NaN（予想未開示）の場合は「予想無し」と表示する
     _forecast_cols_jp = ["売上高_来年通期予想", "営業利益_来年通期予想", "最終益_来年通期予想"]
     for _fc in _forecast_cols_jp:
         if _fc in df.columns:
             df[_fc] = df[_fc].where(df[_fc].notna(), other="予想無し")
 
     try:
-        df.to_excel(outp, index=False)
+        with pd.ExcelWriter(outp, engine="openpyxl") as writer:
+            df.to_excel(writer, sheet_name=DATA_SHEET, index=False)
     except PermissionError as e:
         raise PermissionError(
             f"Excel ファイルに書けません（開いたままの Excel を閉じてください）: {outp}"
         ) from e
     try:
-        _apply_excel_display_formats(outp)
+        _apply_excel_display_formats_workbook(outp)
     except Exception:
-        # 表示調整は補助。失敗しても parquet は有効。
         pass
     return outp, df
 

@@ -1,0 +1,34 @@
+code: '7256'
+company: 河西工業
+market: スタンダード
+sector17: 自動車・輸送機
+sector33: 輸送用機器
+fiscal_year: 3月31日
+fiscal_quarter: 第３四半期
+announcement_date: '2026-02-16'
+price:
+  close: 258.0
+  market_cap: 101.9億円
+financials:
+  net_sales:
+    prior_actual: 2143.2億円
+    latest_actual: 2188.0億円
+    next_forecast: 2000.0億円
+  operating_profit:
+    prior_actual: 22.5億円
+    latest_actual: -2.9億円
+    next_forecast: 40.0億円
+  net_income:
+    prior_actual: -3.1億円
+    latest_actual: -91.8億円
+    next_forecast: 10.0億円
+  equity_ratio: 8.6%
+shares_outstanding: 39511728
+demand_supply:
+  avg_daily_volume_5d: 413660
+  long_margin_volume: 4166700
+  short_margin_volume: 25500
+  short_ratio_to_outstanding: 0.7%
+  discretionary_investor: Nomura International plc
+yfinance_supplemented: false
+snapshot_date: '2026-04-05'
