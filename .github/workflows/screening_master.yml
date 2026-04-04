@@ -56,7 +56,12 @@ jobs:
           if ! git diff --staged --quiet; then
             git commit -m "data: screening master $(date +'%Y-%m-%d')"
             git fetch origin master
-            git rebase origin/master
+            if ! git rebase origin/master; then
+              # バイナリファイルの衝突はETL生成物（新しい方）を優先して解決
+              git diff --name-only --diff-filter=U | xargs -I{} git checkout --theirs {}
+              git diff --name-only --diff-filter=U | xargs git add
+              git -c core.editor=true rebase --continue
+            fi
             git push
           fi
 
