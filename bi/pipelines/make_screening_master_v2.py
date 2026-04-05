@@ -658,40 +658,48 @@ def main() -> None:
             .reset_index(drop=True)
         )
 
-        _pivot_src = all_long[["Code", "_week_idx", "LongMarginTradeVolume"]].drop_duplicates(
-            ["Code", "_week_idx"]
-        )
-        pivot = _pivot_src.pivot(
-            index="Code", columns="_week_idx", values="LongMarginTradeVolume"
-        )
-        pivot = pivot.reset_index()
+        def _pivot_margin_col(all_df: pd.DataFrame, value_col: str, prefix: str, n: int) -> tuple[pd.DataFrame, list[str]]:
+            """週次データを WkSeq01（最古）〜WkSeqNN（直近）列にピボット展開して返す。"""
+            src = all_df[["Code", "_week_idx", value_col]].drop_duplicates(["Code", "_week_idx"])
+            pv = src.pivot(index="Code", columns="_week_idx", values=value_col).reset_index()
+            result = pv[["Code"]].copy()
+            cols: list[str] = []
+            for seq in range(1, n + 1):
+                wi = n - seq  # week_idx: 0=直近, n-1=最古
+                col = f"{prefix}_WkSeq{seq:02d}"
+                cols.append(col)
+                if wi in pv.columns:
+                    result = result.merge(pv[["Code", wi]].rename(columns={wi: col}), on="Code", how="outer")
+                else:
+                    result[col] = pd.NA
+            return result, cols
 
-        wm_df = latest[["Code", "ShortMarginTradeVolume"]].copy()
-        long_seq_cols: list[str] = []
-        for seq in range(1, margin_weeks + 1):
-            wi = margin_weeks - seq
-            col = f"LongMargin_WkSeq{seq:02d}"
-            long_seq_cols.append(col)
-            if wi in pivot.columns:
-                sub = pivot[["Code", wi]].rename(columns={wi: col})
-                wm_df = wm_df.merge(sub, on="Code", how="outer")
+        long_pivot, long_seq_cols = _pivot_margin_col(all_long, "LongMarginTradeVolume", "LongMargin", margin_weeks)
+        short_pivot, short_seq_cols = _pivot_margin_col(all_long, "ShortMarginTradeVolume", "ShortMargin", margin_weeks)
+
+        wm_df = latest[["Code"]].copy()
+        wm_df = wm_df.merge(long_pivot, on="Code", how="outer")
+        wm_df = wm_df.merge(short_pivot, on="Code", how="outer")
+
+        # 後方互換: LongMarginTradeVolume / ShortMarginTradeVolume は直近週の値
+        for val_col, seq_col, fb_col in [
+            ("LongMarginTradeVolume",  f"LongMargin_WkSeq{margin_weeks:02d}",  "LongMarginTradeVolume"),
+            ("ShortMarginTradeVolume", f"ShortMargin_WkSeq{margin_weeks:02d}", "ShortMarginTradeVolume"),
+        ]:
+            _fb = latest.set_index("Code")[fb_col]
+            if seq_col in wm_df.columns:
+                wm_df[val_col] = pd.to_numeric(wm_df[seq_col], errors="coerce")
             else:
-                wm_df[col] = pd.NA
-
-        _seq_latest = f"LongMargin_WkSeq{margin_weeks:02d}"
-        _fb = latest.set_index("Code")["LongMarginTradeVolume"]
-        if _seq_latest in wm_df.columns:
-            wm_df["LongMarginTradeVolume"] = pd.to_numeric(wm_df[_seq_latest], errors="coerce")
-        else:
-            wm_df["LongMarginTradeVolume"] = pd.NA
-        wm_df["LongMarginTradeVolume"] = wm_df["LongMarginTradeVolume"].fillna(wm_df["Code"].map(_fb))
+                wm_df[val_col] = pd.NA
+            wm_df[val_col] = wm_df[val_col].fillna(wm_df["Code"].map(_fb))
 
         _s = wm_df["ShortMarginTradeVolume"].notna().sum()
         _l = wm_df["LongMarginTradeVolume"].notna().sum()
         n_weeks_got = len(wm_all_weeks)
         print(
             f"margin_interest 集計後: rows={len(wm_df)} weeks_fetched={n_weeks_got} "
-            f"Short非欠損={int(_s)} Long非欠損={int(_l)} (買残8週列: {long_seq_cols})"
+            f"Short非欠損={int(_s)} Long非欠損={int(_l)} "
+            f"(買残8週列: {long_seq_cols} / 売残8週列: {short_seq_cols})"
         )
         if not universe_df.empty:
             uc = set(universe_df["Code"].astype(str))
@@ -707,16 +715,18 @@ def main() -> None:
 
     # 6) daily_quotes (v2: equities/bars/daily)
     trading_day_latest = _latest_trading_day_date_v2(client)
+    # 出来高ブロック数（5日×N）: デフォルト8ブロック=40営業日
+    vol_blocks = max(1, int(os.environ.get("VOLUME_BLOCK_WEEKS", "8")))
+    vol_days_total = vol_blocks * 5  # 5営業日×ブロック数
     trading_days: list[date] = [trading_day_latest]
     d_prev = trading_day_latest
-    # 直近5営業日（latest + 前4つ）
-    for _ in range(4):
+    for _ in range(vol_days_total - 1):
         d_prev = _previous_trading_day_date_v2(client, before=d_prev, max_back_days=14)
         trading_days.append(d_prev)
 
     # latest day: Close 用（従来どおり 1日分のみ）
     trading_str_latest = trading_day_latest.strftime("%Y-%m-%d")
-    print(f"daily_quotes: latest date={trading_str_latest}")
+    print(f"daily_quotes: latest date={trading_str_latest} vol_blocks={vol_blocks}({vol_days_total}日)")
     latest_rows = _fetch_paginated_v2(
         client,
         "/equities/bars/daily",
@@ -737,17 +747,18 @@ def main() -> None:
         px_close_df = px_latest_df[["Code", "Close"]].copy()
         px_close_df = px_close_df.drop_duplicates("Code", keep="last")
 
-    # 直近5営業日の出来高（Vo）の平均
+    # 全期間の出来高（Vo）を収集: (Code, day_idx) で管理
+    # day_idx=0が直近、day_idx=vol_days_total-1が最古
     vo_frames: list[pd.DataFrame] = []
-    # latest day は Close 用に取得済みレスポンスから Vo も流用する（API呼び出し回数削減）
+    # latest day は Close 用に取得済みレスポンスから流用
     if not px_latest_df.empty and "Vo" in px_latest_df.columns:
         df_latest_vo = px_latest_df.copy()
         df_latest_vo = _to_numeric_df(df_latest_vo, ["Vo"])
-        df_latest_vo = df_latest_vo[["Code", "Vo"]].copy()
-        df_latest_vo = df_latest_vo.drop_duplicates("Code", keep="last")
+        df_latest_vo = df_latest_vo[["Code", "Vo"]].drop_duplicates("Code", keep="last")
+        df_latest_vo["_day_idx"] = 0
         vo_frames.append(df_latest_vo)
 
-    for d_scan in trading_days[1:]:
+    for day_idx, d_scan in enumerate(trading_days[1:], start=1):
         ds = d_scan.strftime("%Y-%m-%d")
         rows = _fetch_paginated_v2(
             client,
@@ -763,23 +774,51 @@ def main() -> None:
         df_day = df_day.copy()
         df_day["Code"] = df_day["Code"].map(_normalize_code_4).astype(str)
         df_day = _to_numeric_df(df_day, ["Vo"])
-        df_day = df_day[["Code", "Vo"]].copy()
-        # 1日内で 4桁コードに統一したときの重複を先に解消（Close と同じ思想）
-        df_day = df_day.drop_duplicates("Code", keep="last")
+        df_day = df_day[["Code", "Vo"]].drop_duplicates("Code", keep="last")
+        df_day["_day_idx"] = day_idx
         vo_frames.append(df_day)
 
     if vo_frames:
         vo_all = pd.concat(vo_frames, ignore_index=True)
+        # ブロックインデックス: day_idx 0〜4→block0(直近), 5〜9→block1, ...
+        vo_all["_block"] = vo_all["_day_idx"] // 5
+
+        # AvgDailyVolume5d = block0（直近5日）の平均（後方互換）
         avg_df = (
-            vo_all.groupby("Code", as_index=False)["Vo"]
+            vo_all[vo_all["_block"] == 0]
+            .groupby("Code", as_index=False)["Vo"]
             .mean()
             .rename(columns={"Vo": "AvgDailyVolume5d"})
         )
+
+        # VolAvg5d_BlkSeq01（最古）〜BlkSeqNN（直近）の列展開
+        vol_block_cols: list[str] = []
+        vol_avg_pivot = pd.DataFrame()
+        for seq in range(1, vol_blocks + 1):
+            blk = vol_blocks - seq  # block 0=直近=SeqNN, vol_blocks-1=最古=Seq01
+            col = f"VolAvg5d_BlkSeq{seq:02d}"
+            vol_block_cols.append(col)
+            blk_avg = (
+                vo_all[vo_all["_block"] == blk]
+                .groupby("Code", as_index=False)["Vo"]
+                .mean()
+                .rename(columns={"Vo": col})
+            )
+            if vol_avg_pivot.empty:
+                vol_avg_pivot = blk_avg
+            else:
+                vol_avg_pivot = vol_avg_pivot.merge(blk_avg, on="Code", how="outer")
+
+        print(f"volume_blocks: {vol_blocks}ブロック×5日 cols={vol_block_cols}")
     else:
         avg_df = pd.DataFrame(columns=["Code", "AvgDailyVolume5d"])
+        vol_avg_pivot = pd.DataFrame(columns=["Code"])
+        vol_block_cols = []
 
-    # Merge: Close + AvgDailyVolume5d
+    # Merge: Close + AvgDailyVolume5d + VolAvg5d_BlkSeq01〜NN
     px_df = px_close_df.merge(avg_df, on="Code", how="left")
+    if not vol_avg_pivot.empty:
+        px_df = px_df.merge(vol_avg_pivot, on="Code", how="left")
 
     # Left join: start from universe
     master = universe_df.merge(statements_df, on="Code", how="left")
@@ -879,10 +918,26 @@ def main() -> None:
         "LongMargin_WkSeq06",
         "LongMargin_WkSeq07",
         "LongMargin_WkSeq08",
+        "ShortMargin_WkSeq01",
+        "ShortMargin_WkSeq02",
+        "ShortMargin_WkSeq03",
+        "ShortMargin_WkSeq04",
+        "ShortMargin_WkSeq05",
+        "ShortMargin_WkSeq06",
+        "ShortMargin_WkSeq07",
+        "ShortMargin_WkSeq08",
         "DiscretionaryInvestmentContractorName",
         "ShortPositionsToSharesOutstandingRatio",
         "ShortPositionsInSharesNumber",
         "AvgDailyVolume5d",
+        "VolAvg5d_BlkSeq01",
+        "VolAvg5d_BlkSeq02",
+        "VolAvg5d_BlkSeq03",
+        "VolAvg5d_BlkSeq04",
+        "VolAvg5d_BlkSeq05",
+        "VolAvg5d_BlkSeq06",
+        "VolAvg5d_BlkSeq07",
+        "VolAvg5d_BlkSeq08",
         "AnnouncementDate",
         "FiscalQuarter",
         "FiscalYear",
