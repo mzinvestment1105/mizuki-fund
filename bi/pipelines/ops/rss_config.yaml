@@ -1,0 +1,54 @@
+# bi/pipelines/ops/rss_config.yaml
+# RSS フィード設定
+
+feeds:
+  # --- トリガー用（Pythonフィルタのみ・LLM不使用）---
+  tdnet:
+    url: "https://webapi.yanoshin.jp/webapi/tdnet/list/{code}.atom"
+    mode: per_stock        # portfolio/positions.md の銘柄コードを差し込む
+    category: trigger
+    llm: false
+
+  google_news:
+    url: "https://news.google.com/rss/search?q={keyword}&hl=ja&gl=JP&ceid=JP:ja"
+    mode: keyword          # 銘柄名・競合名・セクター名を差し込む
+    category: trigger
+    llm: false
+
+  yahoo_biz:
+    url: "https://news.yahoo.co.jp/rss/topics/business.xml"
+    mode: static
+    category: trigger
+    llm: false
+
+  # --- マクロ用（Haiku で要約）---
+  boj:
+    url: "https://www.boj.or.jp/rss/whatsnew.xml"
+    mode: static
+    category: macro
+    llm: haiku
+
+  dir:
+    url: "https://www.dir.co.jp/rss/research.xml"
+    mode: static
+    category: macro
+    llm: haiku
+
+  mof:
+    url: "https://www.mof.go.jp/about_mof/rss/index.xml"
+    mode: static
+    category: macro
+    llm: haiku
+
+  # --- 補完（必要時のみ手動実行）---
+  fsa:
+    url: "https://www.fsa.go.jp/kouhou/rss.html"
+    mode: static
+    category: supplement
+    llm: false
+
+  spgi:
+    url: "https://www.spglobal.com/spdji/jp/rss/"
+    mode: static
+    category: supplement
+    llm: false
