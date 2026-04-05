@@ -658,9 +658,12 @@ def main() -> None:
             else:
                 wm_df[col] = pd.NA
 
-        _seq08 = "LongMargin_WkSeq08"
+        _seq_latest = f"LongMargin_WkSeq{margin_weeks:02d}"
         _fb = latest.set_index("Code")["LongMarginTradeVolume"]
-        wm_df["LongMarginTradeVolume"] = pd.to_numeric(wm_df[_seq08], errors="coerce")
+        if _seq_latest in wm_df.columns:
+            wm_df["LongMarginTradeVolume"] = pd.to_numeric(wm_df[_seq_latest], errors="coerce")
+        else:
+            wm_df["LongMarginTradeVolume"] = pd.NA
         wm_df["LongMarginTradeVolume"] = wm_df["LongMarginTradeVolume"].fillna(wm_df["Code"].map(_fb))
 
         _s = wm_df["ShortMarginTradeVolume"].notna().sum()
