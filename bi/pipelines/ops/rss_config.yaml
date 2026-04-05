@@ -1,54 +1,42 @@
 # bi/pipelines/ops/rss_config.yaml
-# RSS フィード設定
+# RSS フィード設定 — マクロ経済・市場ニュース中心
+#
+# agent フィールド: どのエージェントが主に使うか（出力セクションの整理用）
+#   macro_analyst  → market/daily/{date}_news_raw.md の「マクロ」セクション
+#   sector_analyst → 同ファイルの「セクター・業界」セクション
+#
+# llm: haiku → ANTHROPIC_API_KEY がある環境でHaiku要約を付与。なければ生テキスト出力。
+#
+# ※ TDnet（銘柄別適時開示）・Google News（銘柄名キーワード）は
+#   fetch_tdnet_disclosures.py が担当（Deep Diveフロー）。本ファイルはマクロ専用。
 
 feeds:
-  # --- トリガー用（Pythonフィルタのみ・LLM不使用）---
-  tdnet:
-    url: "https://webapi.yanoshin.jp/webapi/tdnet/list/{code}.atom"
-    mode: per_stock        # portfolio/positions.md の銘柄コードを差し込む
-    category: trigger
-    llm: false
 
-  google_news:
-    url: "https://news.google.com/rss/search?q={keyword}&hl=ja&gl=JP&ceid=JP:ja"
-    mode: keyword          # 銘柄名・競合名・セクター名を差し込む
-    category: trigger
-    llm: false
-
-  yahoo_biz:
-    url: "https://news.yahoo.co.jp/rss/topics/business.xml"
-    mode: static
-    category: trigger
-    llm: false
-
-  # --- マクロ用（Haiku で要約）---
+  # ── 日銀（金融政策変更トリガー）────────────────────────────────────
   boj:
     url: "https://www.boj.or.jp/rss/whatsnew.xml"
-    mode: static
     category: macro
+    agent: macro_analyst
     llm: haiku
 
-  dir:
-    url: "https://www.dir.co.jp/rss/research.xml"
-    mode: static
+  # ── 大和総研（日本経済予測・金融市場分析）──────────────────────────
+  # Daiwa Institute of Research (dir.co.jp)
+  # 機関投資家視点が無料で取れる唯一のソース
+  daiwa_economics:
+    url: "https://www.dir.co.jp/feed/economics.atom"
     category: macro
+    agent: macro_analyst
     llm: haiku
 
-  mof:
-    url: "https://www.mof.go.jp/about_mof/rss/index.xml"
-    mode: static
+  daiwa_capital_mkt:
+    url: "https://www.dir.co.jp/feed/capital-mkt.atom"
     category: macro
+    agent: macro_analyst
     llm: haiku
 
-  # --- 補完（必要時のみ手動実行）---
-  fsa:
-    url: "https://www.fsa.go.jp/kouhou/rss.html"
-    mode: static
-    category: supplement
-    llm: false
-
-  spgi:
-    url: "https://www.spglobal.com/spdji/jp/rss/"
-    mode: static
-    category: supplement
+  # ── 市場ニュース全般（Yahoo ビジネス）──────────────────────────────
+  yahoo_biz:
+    url: "https://news.yahoo.co.jp/rss/topics/business.xml"
+    category: market_news
+    agent: macro_analyst
     llm: false

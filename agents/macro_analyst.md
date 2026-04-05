@@ -54,6 +54,11 @@ PMの哲学に基づき、以下のシグナルを検知した場合は明確に
 - `market/watchlist.md` - 監視対象リスト
 - `market/macro_thesis.md` - 現在のマクロ見通し
 - `market/daily/` - **直近5日分のみ**（それ以前はarchive/）
+  - `{date}_news_raw.md` — yfinance + RSS 統合ニュース生データ（fetch_rss.py が生成）
+    - 株価指数・為替ニュース（yfinance）
+    - 日銀・大和総研(DIR) マクロ RSS（金融政策・経済予測・市場分析）
+    - Yahoo ビジネスニュース RSS
+  - `{date}_sonnet_macro.md` — 当エージェントが生成するデイリーレポート
 
 ## 出力先
 - `market/daily/YYYY-MM-DD.md` - デイリーレポート
