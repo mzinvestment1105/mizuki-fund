@@ -147,6 +147,96 @@ def _fetch_fins_summary_rows_for_code(
     return []
 
 
+def _required_final_col_names(*, yfinance: bool, ss_weeks: int) -> list[str]:
+    """screening_master 出力列の固定順（フルETL・market-refresh-only 共通）。"""
+    cols = [
+        "Code",
+        "CompanyName",
+        "MarketCodeName",
+        "Sector17CodeName",
+        "Sector33CodeName",
+        "Close",
+        "MarketCap",
+    ]
+    if yfinance:
+        cols.extend(["YFinanceMarketCap", "YFinanceSharesOutstanding"])
+    cols.extend(
+        [
+            "NetSales_PriorYear_Actual",
+            "NetSales_LatestYear_Actual",
+            "NetSales_NextYear_Forecast",
+            "OperatingProfit_PriorYear_Actual",
+            "OperatingProfit_LatestYear_Actual",
+            "OperatingProfit_NextYear_Forecast",
+            "Profit_PriorYear_Actual",
+            "Profit_LatestYear_Actual",
+            "Profit_NextYear_Forecast",
+            "NetSales_TwoYearsPrior_Actual",
+            "OperatingProfit_TwoYearsPrior_Actual",
+            "Profit_TwoYearsPrior_Actual",
+            "CashAndEquivalents_LatestFY",
+            "Equity_LatestFY",
+            "PER_Trailing",
+            "PBR_Trailing",
+            "ROE_LatestYear",
+            "EquityToAssetRatio",
+            "NumberOfIssuedAndOutstandingSharesAtTheEndOfFiscalYearIncludingTreasuryStock",
+            "ShortMarginTradeVolume",
+            "LongMarginTradeVolume",
+            "LongMargin_WkSeq01",
+            "LongMargin_WkSeq02",
+            "LongMargin_WkSeq03",
+            "LongMargin_WkSeq04",
+            "LongMargin_WkSeq05",
+            "LongMargin_WkSeq06",
+            "LongMargin_WkSeq07",
+            "LongMargin_WkSeq08",
+            "ShortMargin_WkSeq01",
+            "ShortMargin_WkSeq02",
+            "ShortMargin_WkSeq03",
+            "ShortMargin_WkSeq04",
+            "ShortMargin_WkSeq05",
+            "ShortMargin_WkSeq06",
+            "ShortMargin_WkSeq07",
+            "ShortMargin_WkSeq08",
+            "DiscretionaryInvestmentContractorName",
+            "ShortPositionsToSharesOutstandingRatio",
+            "ShortPositionsInSharesNumber",
+        ]
+    )
+    cols.extend([f"ShortSale_WkSeq{i:02d}" for i in range(1, ss_weeks + 1)])
+    cols.extend(
+        [
+            "AvgDailyVolume5d",
+            "VolAvg5d_BlkSeq01",
+            "VolAvg5d_BlkSeq02",
+            "VolAvg5d_BlkSeq03",
+            "VolAvg5d_BlkSeq04",
+            "VolAvg5d_BlkSeq05",
+            "VolAvg5d_BlkSeq06",
+            "VolAvg5d_BlkSeq07",
+            "VolAvg5d_BlkSeq08",
+            "AvgDailyValue5d",
+            "ValAvg5d_BlkSeq01",
+            "ValAvg5d_BlkSeq02",
+            "ValAvg5d_BlkSeq03",
+            "ValAvg5d_BlkSeq04",
+            "ValAvg5d_BlkSeq05",
+            "ValAvg5d_BlkSeq06",
+            "ValAvg5d_BlkSeq07",
+            "ValAvg5d_BlkSeq08",
+            "AnnouncementDate",
+            "FiscalQuarter",
+            "FiscalYear",
+            "YFinance_Supplemented",
+            "ETLRunId",
+            "ETLStartedAtUTC",
+            "ETLStartedAtJST",
+        ]
+    )
+    return cols
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="スクリーニング用 master parquet 生成（J-Quants v2 API）"
@@ -193,6 +283,12 @@ def main() -> None:
         help="J-Quants /fins/summary の行数が少ない銘柄でも、Yahoo 年次損益へフォールバックしない。"
         " 省略時は yfinance が入っていれば自動（YFINANCE_STATEMENT_FALLBACK=0 で無効化）。",
     )
+    parser.add_argument(
+        "--market-refresh-only",
+        action="store_true",
+        help="既存 parquet を読み、信用・空売り・終値/出来高/売買代金ブロックだけ再取得して上書き（財務・上場情報は据え置き）。"
+        " 要: あらかじめ screening_master.parquet が存在すること。",
+    )
     args = parser.parse_args()
     etl_started_at_utc = datetime.now(timezone.utc).replace(microsecond=0)
     jst = timezone(timedelta(hours=9))
@@ -233,6 +329,60 @@ def main() -> None:
 
     today = date.today()
     today_str = today.strftime("%Y-%m-%d")
+
+    if args.market_refresh_only:
+        from market_overlays import (
+            fetch_px_vol_val_overlay,
+            fetch_short_sale_overlay,
+            fetch_weekly_margin_overlay,
+            merge_market_into_master,
+        )
+
+        if not out_path.exists():
+            raise FileNotFoundError(
+                f"--market-refresh-only には既存の parquet が必要です: {out_path}"
+            )
+        master_refresh = pd.read_parquet(out_path)
+        codes_set_refresh = set(master_refresh["Code"].dropna().astype(str))
+        _ss_w_refresh = max(1, int(os.environ.get("SHORT_SALE_LOOKBACK_WEEKS", "8")))
+        print(f"market-refresh-only: codes={len(codes_set_refresh)} -> {out_path}")
+        ss_ov = fetch_short_sale_overlay(client, today, codes_set_refresh)
+        wm_ov = fetch_weekly_margin_overlay(client, today, codes_set_refresh)
+        px_ov = fetch_px_vol_val_overlay(client, today)
+        _codes_list_refresh = master_refresh["Code"].dropna().astype(str).tolist()
+        master_refresh = merge_market_into_master(
+            master_refresh,
+            px_ov,
+            wm_ov,
+            ss_ov,
+            refresh_yfinance=args.yfinance,
+            yf_codes=_codes_list_refresh if args.yfinance else None,
+        )
+        master_refresh["ETLRunId"] = etl_run_id
+        master_refresh["ETLStartedAtUTC"] = etl_started_at_utc_str
+        master_refresh["ETLStartedAtJST"] = etl_started_at_jst_str
+        _req = _required_final_col_names(yfinance=args.yfinance, ss_weeks=_ss_w_refresh)
+        for c in _req:
+            if c not in master_refresh.columns:
+                master_refresh[c] = pd.NA
+        master_refresh = master_refresh[_req].copy().sort_values("Code", kind="mergesort").reset_index(drop=True)
+        tmp_r = out_path.with_suffix(out_path.suffix + ".tmp")
+        master_refresh.to_parquet(tmp_r, index=False)
+        tmp_r.replace(out_path)
+        print(f"market-refresh-only saved: {out_path} rows={len(master_refresh)} cols={len(master_refresh.columns)}")
+        if want_excel:
+            from convert_to_excel import parquet_to_excel
+
+            xlsx_path = out_path.with_suffix(".xlsx")
+            try:
+                xout, _xf = parquet_to_excel(out_path, xlsx_path)
+                print(f"excel: {xout}")
+            except PermissionError:
+                print(
+                    f"Excel 出力スキップ（ロック）: {xlsx_path} を閉じて "
+                    f"`python convert_to_excel.py --input {out_path} --output ...` を実行してください。"
+                )
+        return
 
     # 1) listed/info (v2: equities/master)
     print(f"listed: date={today_str}")
@@ -888,86 +1038,7 @@ def main() -> None:
     master["ETLStartedAtUTC"] = etl_started_at_utc_str
     master["ETLStartedAtJST"] = etl_started_at_jst_str
 
-    required_final_cols = [
-        "Code",
-        "CompanyName",
-        "MarketCodeName",
-        "Sector17CodeName",
-        "Sector33CodeName",
-        "Close",
-        "MarketCap",
-    ]
-    if args.yfinance:
-        required_final_cols.extend(["YFinanceMarketCap", "YFinanceSharesOutstanding"])
-    required_final_cols.extend(
-        [
-        "NetSales_PriorYear_Actual",
-        "NetSales_LatestYear_Actual",
-        "NetSales_NextYear_Forecast",
-        "OperatingProfit_PriorYear_Actual",
-        "OperatingProfit_LatestYear_Actual",
-        "OperatingProfit_NextYear_Forecast",
-        "Profit_PriorYear_Actual",
-        "Profit_LatestYear_Actual",
-        "Profit_NextYear_Forecast",
-        "NetSales_TwoYearsPrior_Actual",
-        "OperatingProfit_TwoYearsPrior_Actual",
-        "Profit_TwoYearsPrior_Actual",
-        "CashAndEquivalents_LatestFY",
-        "Equity_LatestFY",
-        "PER_Trailing",
-        "PBR_Trailing",
-        "ROE_LatestYear",
-        "EquityToAssetRatio",
-        "NumberOfIssuedAndOutstandingSharesAtTheEndOfFiscalYearIncludingTreasuryStock",
-        "ShortMarginTradeVolume",
-        "LongMarginTradeVolume",
-        "LongMargin_WkSeq01",
-        "LongMargin_WkSeq02",
-        "LongMargin_WkSeq03",
-        "LongMargin_WkSeq04",
-        "LongMargin_WkSeq05",
-        "LongMargin_WkSeq06",
-        "LongMargin_WkSeq07",
-        "LongMargin_WkSeq08",
-        "ShortMargin_WkSeq01",
-        "ShortMargin_WkSeq02",
-        "ShortMargin_WkSeq03",
-        "ShortMargin_WkSeq04",
-        "ShortMargin_WkSeq05",
-        "ShortMargin_WkSeq06",
-        "ShortMargin_WkSeq07",
-        "ShortMargin_WkSeq08",
-        "DiscretionaryInvestmentContractorName",
-        "ShortPositionsToSharesOutstandingRatio",
-        "ShortPositionsInSharesNumber",
-        "AvgDailyVolume5d",
-        "VolAvg5d_BlkSeq01",
-        "VolAvg5d_BlkSeq02",
-        "VolAvg5d_BlkSeq03",
-        "VolAvg5d_BlkSeq04",
-        "VolAvg5d_BlkSeq05",
-        "VolAvg5d_BlkSeq06",
-        "VolAvg5d_BlkSeq07",
-        "VolAvg5d_BlkSeq08",
-        "AvgDailyValue5d",
-        "ValAvg5d_BlkSeq01",
-        "ValAvg5d_BlkSeq02",
-        "ValAvg5d_BlkSeq03",
-        "ValAvg5d_BlkSeq04",
-        "ValAvg5d_BlkSeq05",
-        "ValAvg5d_BlkSeq06",
-        "ValAvg5d_BlkSeq07",
-        "ValAvg5d_BlkSeq08",
-        "AnnouncementDate",
-        "FiscalQuarter",
-        "FiscalYear",
-        "YFinance_Supplemented",
-        "ETLRunId",
-        "ETLStartedAtUTC",
-        "ETLStartedAtJST",
-        ]
-    )
+    required_final_cols = _required_final_col_names(yfinance=args.yfinance, ss_weeks=ss_weeks)
 
     for c in required_final_cols:
         if c not in master.columns:

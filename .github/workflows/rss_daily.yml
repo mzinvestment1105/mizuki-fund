@@ -2,7 +2,7 @@ name: RSS日次ニュース取得
 
 on:
   schedule:
-    - cron: '0 22 * * 1-5'   # 毎週月〜金 07:00 JST（UTC+9）
+    - cron: '0 22 * * *'   # 毎日 22:00 UTC（日本時間では翌07:00前後）
   workflow_dispatch:
 
 jobs:
@@ -29,9 +29,10 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           PYTHONIOENCODING: utf-8
+          RSS_LOOKBACK_DAYS: "30"
         run: |
           cd bi/pipelines
-          python fetch_rss.py --category all --days 1
+          python fetch_rss.py --category all
 
       - name: 出力ファイルをコミット
         run: |

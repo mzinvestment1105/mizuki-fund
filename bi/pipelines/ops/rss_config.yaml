@@ -7,6 +7,10 @@
 #
 # llm: haiku → ANTHROPIC_API_KEY がある環境でHaiku要約を付与。なければ生テキスト出力。
 #
+# fetch_rss.py: さかのぼり日数は --days または環境変数 RSS_LOOKBACK_DAYS（未指定時CLI既定は30日）。
+#   フィードあたり件数: RSS_MAX_ITEMS_PER_FEED または min(35, 10+日数)。
+#   新着だけ: python fetch_rss.py --new-only（.rss_seen.txt で重複除外）
+#
 # ※ TDnet（銘柄別適時開示）・Google News（銘柄名キーワード）は
 #   fetch_tdnet_disclosures.py が担当（Deep Diveフロー）。本ファイルはマクロ専用。
 

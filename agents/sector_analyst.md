@@ -36,6 +36,7 @@
 | 機関空売り残 | 少ない/減少 | - | 多くても必ずしもネガティブではないがヘッジの場合も。暴落リスク注意 |
 
 ## 参照すべきファイル
+- `market/daily/{date}_news_raw.md` — 日次ニュース生データの「セクター・業界 RSS」セクションを参照
 - `playbook/sector_criteria.md` - 業界選定の基準
 - `playbook/stock_criteria.md` - 個別銘柄選定の基準
 - `playbook/indicators.md` - 重視するファンダメンタルズ・需給指標

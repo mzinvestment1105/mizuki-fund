@@ -17,8 +17,13 @@
   その行が API に無い年度は欠損のまま）。
 
 【予想】
-  売上 **NetSales_NextYear_Forecast** は **(1)** 全行を走査し、各行で **NxFSales / NxFNCSales** を優先、
-  なければ **FSales / FNCSales** を候補とし、**DiscDate が最大**の開示を採用（NX_FSALES_MAX_AGE_DAYS 以内）。
+  **Nx*（翌期の会社予想）** は、直近本決算の会計年度末 `fye_cy` から見た **真の「翌期」**（`_fye` で `fye_cy` より後の最小の期末日＝`fye_next`）に揃える。
+  API の **`NxtFYEn`（その行の予想が指す次の期の期末日）** が `fye_next` と一致する行だけを候補にし、
+  そのうえで **データ全体の最新開示日から NX_FSALES_MAX_AGE_DAYS（既定 550）日以内**かつ **DiscDate が最も新しい**開示を採用する。
+  `NxtFYEn` が空の行は年度が判断できないため、既定（`NX_FORECAST_REQUIRE_NXT_FYEN=1`）では候補から外す（`0` で従来挙動に近い緩和）。
+  `fye_next` が決まらない経路では Nx 整合はスキップし、従来どおり日付・550 日のみで選ぶ。
+  売上 **NetSales_NextYear_Forecast** は **NxFSales / NxFNCSales** を上記ルールで選び、
+  なければ **翌期行の FSales / FNCSales**（`_forecast_from_next_fy_rows`）と開示日で対決。
   **(2)** それでも空のとき **株探の「予」行に近い推定**:  
   **今期の会社予想売上（NetSales_LatestYear_Actual） ×（昨期の本決算売上 ÷ 昨期本決算の直前の業績修正 FNCSales）**  
   を **百万円単位で四捨五入**（例: 130A で 91×235/189 → 113 百万円）。  
@@ -147,6 +152,46 @@ def _val_from_row(row: pd.Series | None, consolidated: list[str], non_consolidat
     return pd.NA
 
 
+def _normalize_date_scalar(val: Any) -> Any:
+    """会計年度末などを pd.Timestamp(日付正規化) で比較用に揃える。無効なら NaT。"""
+    if val is None:
+        return pd.NaT
+    try:
+        if pd.isna(val):
+            return pd.NaT
+    except (TypeError, ValueError):
+        pass
+    ts = pd.to_datetime(val, errors="coerce")
+    if pd.isna(ts):
+        return pd.NaT
+    return ts.normalize()
+
+
+def _fye_next_after_cy(work: pd.DataFrame, fye_cy: Any) -> Any:
+    """work['_fye'] のうち fye_cy より後の最小値。無ければ NaT。"""
+    if work is None or work.empty or "_fye" not in work.columns:
+        return pd.NaT
+    fn_cy = _normalize_date_scalar(fye_cy)
+    if pd.isna(fn_cy):
+        return pd.NaT
+    future: list[Any] = []
+    for f in work["_fye"].dropna().unique():
+        t = _normalize_date_scalar(f)
+        if pd.isna(t):
+            continue
+        if t > fn_cy:
+            future.append(t)
+    if not future:
+        return pd.NaT
+    return min(future)
+
+
+def _nx_forecast_require_nxt_fyen() -> bool:
+    """True: NxtFYEn が fye_next と一致する行のみ Nx 候補（既定）。0/false/no で緩和。"""
+    raw = os.environ.get("NX_FORECAST_REQUIRE_NXT_FYEN", "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
 def _forecast_first_non_na_from_newest(
     scan: pd.DataFrame,
     consolidated: list[str],
@@ -231,6 +276,60 @@ def _forecast_by_newest_disc_date_with_meta(
             continue
         dd = pd.to_datetime(r.get("DiscDate"), errors="coerce")
         if pd.isna(dd):
+            continue
+        if pd.notna(d_last) and (d_last - dd).days > max_age_days:
+            continue
+        if pd.isna(best_dd) or dd > best_dd:
+            best_dd = dd
+            best_v = v
+    return best_v, best_dd
+
+
+def _forecast_by_newest_disc_date_with_meta_aligned_nxt_fye(
+    scan: pd.DataFrame,
+    consolidated: list[str],
+    non_consolidated: list[str],
+    *,
+    fye_next: Any,
+) -> tuple[Any, Any]:
+    """
+    Nx* 予想: **NxtFYEn が fye_next（直近本決算の翌期末）と一致**する行だけ候補にし、
+    そのうえで 550 日・DiscDate 最新を _forecast_by_newest_disc_date_with_meta と同様に適用。
+    fye_next が NaT のときは従来メタ（年度不問）にフォールバック。
+    """
+    if scan is None or scan.empty:
+        return pd.NA, pd.NaT
+    if pd.isna(_normalize_date_scalar(fye_next)):
+        return _forecast_by_newest_disc_date_with_meta(scan, consolidated, non_consolidated)
+    if not _nx_forecast_require_nxt_fyen():
+        return _forecast_by_newest_disc_date_with_meta(scan, consolidated, non_consolidated)
+
+    if "DiscDate" not in scan.columns:
+        return _forecast_first_non_na_from_newest(scan, consolidated, non_consolidated), pd.NaT
+
+    fye_next_n = _normalize_date_scalar(fye_next)
+    max_age_raw = os.environ.get("NX_FORECAST_MAX_AGE_DAYS", "").strip()
+    if max_age_raw:
+        max_age_days = int(max_age_raw)
+    else:
+        max_age_days = int(os.environ.get("NX_FSALES_MAX_AGE_DAYS", "550"))
+    d_series = pd.to_datetime(scan["DiscDate"], errors="coerce")
+    d_last = d_series.iloc[-1] if len(scan) else pd.NaT
+    if pd.isna(d_last):
+        d_last = d_series.max()
+
+    best_v: Any = pd.NA
+    best_dd = pd.NaT
+    for pos in range(len(scan)):
+        r = scan.iloc[pos]
+        v = _val_from_row(r, consolidated, non_consolidated)
+        if pd.isna(v):
+            continue
+        dd = pd.to_datetime(r.get("DiscDate"), errors="coerce")
+        if pd.isna(dd):
+            continue
+        row_nxt = _normalize_date_scalar(r.get("NxtFYEn"))
+        if pd.isna(row_nxt) or row_nxt != fye_next_n:
             continue
         if pd.notna(d_last) and (d_last - dd).days > max_age_days:
             continue
@@ -447,9 +546,19 @@ def _apply_forecasts_from_newest_disclosure_row_only(
     else:
         scan = work
 
-    nx_sales, nx_sales_dd = _forecast_by_newest_disc_date_with_meta(scan, ["NxFSales"], ["NxFNCSales"])
-    nx_op, nx_op_dd = _forecast_by_newest_disc_date_with_meta(scan, ["NxFOP"], ["NxFNCOP"])
-    nx_np, nx_np_dd = _forecast_by_newest_disc_date_with_meta(scan, ["NxFNp", "NxFNP"], ["NxFNCNP"])
+    fye_next = pd.NaT
+    if "_fye" in work.columns and fye_cy is not None and pd.notna(_normalize_date_scalar(fye_cy)):
+        fye_next = _fye_next_after_cy(work, fye_cy)
+
+    nx_sales, nx_sales_dd = _forecast_by_newest_disc_date_with_meta_aligned_nxt_fye(
+        scan, ["NxFSales"], ["NxFNCSales"], fye_next=fye_next
+    )
+    nx_op, nx_op_dd = _forecast_by_newest_disc_date_with_meta_aligned_nxt_fye(
+        scan, ["NxFOP"], ["NxFNCOP"], fye_next=fye_next
+    )
+    nx_np, nx_np_dd = _forecast_by_newest_disc_date_with_meta_aligned_nxt_fye(
+        scan, ["NxFNp", "NxFNP"], ["NxFNCNP"], fye_next=fye_next
+    )
 
     next_sales, next_sales_dd = pd.NA, pd.NaT
     next_op, next_op_dd = pd.NA, pd.NaT
@@ -490,7 +599,6 @@ def _apply_forecasts_from_newest_disclosure_row_only(
         implied = _next_year_sales_forecast_implied_kabutan_style(out, work, fye_py, sort_keys)
         if pd.notna(implied):
             out["NetSales_NextYear_Forecast"] = implied
-
 
 
 def _attach_fye_and_4q_fy_rank(frame: pd.DataFrame) -> pd.DataFrame | None:

@@ -28,6 +28,31 @@ COND_SHEET = "スクリーニング条件"
 RESULT_SHEET = "スクリーニング結果"
 TABLE_NAME = "ScrMaster"
 
+
+def _jp_headers_weekly_short_vol_val() -> dict[str, str]:
+    """信用売り8週・機関空売り8週・出来高/売買代金ブロック8本の日本語ヘッダ（買い週次と同じ命名規則）。"""
+    out: dict[str, str] = {}
+    for i in range(1, 9):
+        m = f"{i:02d}"
+        if i == 1:
+            wk_suf = "_最古"
+        elif i == 8:
+            wk_suf = "_直近"
+        else:
+            wk_suf = ""
+        out[f"ShortMargin_WkSeq{m}"] = f"信用売り残_週次{m}{wk_suf}"
+        out[f"ShortSale_WkSeq{m}"] = f"機関空売り株数_週次{m}{wk_suf}"
+        if i == 1:
+            blk_suf = "_最古"
+        elif i == 8:
+            blk_suf = "_直近"
+        else:
+            blk_suf = ""
+        out[f"VolAvg5d_BlkSeq{m}"] = f"出来高5日平均_ブロック{m}{blk_suf}"
+        out[f"ValAvg5d_BlkSeq{m}"] = f"売買代金5日平均_ブロック{m}{blk_suf}"
+    return out
+
+
 DROP_COLS = [
     "DiscretionaryInvestmentContractorName",
     "ShortPositionsToSharesOutstandingRatio",
@@ -74,6 +99,7 @@ JP_HEADERS: dict[str, str] = {
     "LongMargin_WkSeq07": "信用買い残_週次07",
     "LongMargin_WkSeq08": "信用買い残_週次08_直近",
     "AvgDailyVolume5d": "出来高_5日平均",
+    "AvgDailyValue5d": "売買代金_5日平均",
     "ShortPositionsInSharesNumber": "空売り残高（株数）",
     "AnnouncementDate": "決算発表予定日",
     "FiscalYear": "会計年度",
@@ -82,6 +108,7 @@ JP_HEADERS: dict[str, str] = {
     "ETLStartedAtUTC": "ETL開始時刻(UTC)",
     "ETLStartedAtJST": "ETL開始時刻(JST)",
 }
+JP_HEADERS.update(_jp_headers_weekly_short_vol_val())
 
 # スクリーニング用派生（parquet には含めず Excel のみ）。
 # 信用は playbook 準拠: 買残/発行株・買残/出来高を主とする。
@@ -119,20 +146,27 @@ HEADER_FILL = PatternFill(fill_type="solid", fgColor="FF000000", bgColor="FF0000
 HEADER_ALIGN = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
 
+def _numeric_col(df: pd.DataFrame, name: str) -> pd.Series:
+    """欠損列時も行インデックス揃った Float64 列を返す（.get + to_numeric(None) のスカラー化を防ぐ）。"""
+    if name not in df.columns:
+        return pd.Series(pd.NA, index=df.index, dtype="Float64")
+    return pd.to_numeric(df[name], errors="coerce")
+
+
 def _add_screening_derived_columns(df: pd.DataFrame) -> pd.DataFrame:
     """スクリーニング用の派生列を英語キーで追加（続けて JP へリネーム）。"""
     out = df.copy()
-    close = pd.to_numeric(out.get("Close"), errors="coerce")
-    mcap = pd.to_numeric(out.get("MarketCap"), errors="coerce")
-    lm = pd.to_numeric(out.get("LongMarginTradeVolume"), errors="coerce")
-    av5 = pd.to_numeric(out.get("AvgDailyVolume5d"), errors="coerce")
-    inst = pd.to_numeric(out.get("ShortPositionsInSharesNumber"), errors="coerce")
-    cash = pd.to_numeric(out.get("CashAndEquivalents_LatestFY"), errors="coerce")
+    close = _numeric_col(out, "Close")
+    mcap = _numeric_col(out, "MarketCap")
+    lm = _numeric_col(out, "LongMarginTradeVolume")
+    av5 = _numeric_col(out, "AvgDailyVolume5d")
+    inst = _numeric_col(out, "ShortPositionsInSharesNumber")
+    cash = _numeric_col(out, "CashAndEquivalents_LatestFY")
 
     inst_yen = inst * close
-    sh_out = pd.to_numeric(
-        out.get("NumberOfIssuedAndOutstandingSharesAtTheEndOfFiscalYearIncludingTreasuryStock"),
-        errors="coerce",
+    sh_out = _numeric_col(
+        out,
+        "NumberOfIssuedAndOutstandingSharesAtTheEndOfFiscalYearIncludingTreasuryStock",
     )
     out["Scr_LongMargin_to_SharesOutstanding"] = lm / sh_out
     out["Scr_LongMargin_to_AvgVol5d"] = lm / av5
@@ -149,16 +183,16 @@ def _add_screening_derived_columns(df: pd.DataFrame) -> pd.DataFrame:
         return r
 
     out["Scr_Sales_CAGR2y"] = _cagr2(
-        out.get("NetSales_TwoYearsPrior_Actual"),
-        out.get("NetSales_LatestYear_Actual"),
+        _numeric_col(out, "NetSales_TwoYearsPrior_Actual"),
+        _numeric_col(out, "NetSales_LatestYear_Actual"),
     )
     out["Scr_OP_CAGR2y"] = _cagr2(
-        out.get("OperatingProfit_TwoYearsPrior_Actual"),
-        out.get("OperatingProfit_LatestYear_Actual"),
+        _numeric_col(out, "OperatingProfit_TwoYearsPrior_Actual"),
+        _numeric_col(out, "OperatingProfit_LatestYear_Actual"),
     )
     out["Scr_NI_CAGR2y"] = _cagr2(
-        out.get("Profit_TwoYearsPrior_Actual"),
-        out.get("Profit_LatestYear_Actual"),
+        _numeric_col(out, "Profit_TwoYearsPrior_Actual"),
+        _numeric_col(out, "Profit_LatestYear_Actual"),
     )
 
     def _fcst_growth(f: pd.Series, a: pd.Series) -> pd.Series:
@@ -170,16 +204,16 @@ def _add_screening_derived_columns(df: pd.DataFrame) -> pd.DataFrame:
         return r
 
     out["Scr_Sales_FcstGrowth"] = _fcst_growth(
-        out.get("NetSales_NextYear_Forecast"),
-        out.get("NetSales_LatestYear_Actual"),
+        _numeric_col(out, "NetSales_NextYear_Forecast"),
+        _numeric_col(out, "NetSales_LatestYear_Actual"),
     )
     out["Scr_OP_FcstGrowth"] = _fcst_growth(
-        out.get("OperatingProfit_NextYear_Forecast"),
-        out.get("OperatingProfit_LatestYear_Actual"),
+        _numeric_col(out, "OperatingProfit_NextYear_Forecast"),
+        _numeric_col(out, "OperatingProfit_LatestYear_Actual"),
     )
     out["Scr_NI_FcstGrowth"] = _fcst_growth(
-        out.get("Profit_NextYear_Forecast"),
-        out.get("Profit_LatestYear_Actual"),
+        _numeric_col(out, "Profit_NextYear_Forecast"),
+        _numeric_col(out, "Profit_LatestYear_Actual"),
     )
     return out
 
@@ -304,7 +338,9 @@ def _apply_excel_display_formats_workbook(path: Path, *, header_row: int = 1) ->
         "信用買い残_週次08_直近",
         "空売り残高（株数）",
         "出来高_5日平均",
+        "売買代金_5日平均",
     }
+    money_jp |= set(_jp_headers_weekly_short_vol_val().values())
     ratio_metric_jp = {
         "PER_実績ベース",
         "PBR_実績ベース",
@@ -538,11 +574,35 @@ def parquet_to_excel(
         df = df.head(int(max_rows))
     outp.parent.mkdir(parents=True, exist_ok=True)
 
+    _wk8_blk8_optional = [
+        *[f"LongMargin_WkSeq{i:02d}" for i in range(1, 9)],
+        *[f"ShortMargin_WkSeq{i:02d}" for i in range(1, 9)],
+        *[f"ShortSale_WkSeq{i:02d}" for i in range(1, 9)],
+        *[f"VolAvg5d_BlkSeq{i:02d}" for i in range(1, 9)],
+        *[f"ValAvg5d_BlkSeq{i:02d}" for i in range(1, 9)],
+        "AvgDailyValue5d",
+    ]
+    for _c in _wk8_blk8_optional:
+        if _c not in df.columns:
+            df[_c] = pd.NA
+
     for _col in ("ShortMarginTradeVolume", "LongMarginTradeVolume"):
         if _col in df.columns:
             df[_col] = pd.to_numeric(df[_col], errors="coerce")
     if "AvgDailyVolume5d" in df.columns:
         df["AvgDailyVolume5d"] = pd.to_numeric(df["AvgDailyVolume5d"], errors="coerce")
+    if "AvgDailyValue5d" in df.columns:
+        df["AvgDailyValue5d"] = pd.to_numeric(df["AvgDailyValue5d"], errors="coerce")
+    _wk_blk_prefixes = (
+        "LongMargin_WkSeq",
+        "ShortMargin_WkSeq",
+        "ShortSale_WkSeq",
+        "VolAvg5d_BlkSeq",
+        "ValAvg5d_BlkSeq",
+    )
+    for _c in list(df.columns):
+        if any(_c.startswith(p) for p in _wk_blk_prefixes):
+            df[_c] = pd.to_numeric(df[_c], errors="coerce")
 
     drop = [c for c in DROP_COLS if c in df.columns]
     if drop:
