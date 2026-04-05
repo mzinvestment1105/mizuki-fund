@@ -17,6 +17,7 @@ from jq_client_utils import (
 from short_sale_utils import (
     QUERY_DISC_DATE_COL,
     aggregate_short_sale_monthly_pool,
+    aggregate_short_sale_weekly_snapshots,
 )
 from update_statements import (
     CRITICAL_COLS,
@@ -285,7 +286,8 @@ def main() -> None:
     # --limit などで先に /fins/summary を大量に叩いた直後に空売りを取ると 429 等でページが欠け、
     # プール行数が減って株数が小さく出ることがある。universe 確定後すぐ全市場を取得し、
     # 集計後に codes_set だけ残す（銘柄別の合算は独立のため数値は一致する）。
-    short_sale_back_days = max(0, int(os.environ.get("SHORT_SALE_LOOKBACK_DAYS", "30")))
+    ss_weeks = max(1, int(os.environ.get("SHORT_SALE_LOOKBACK_WEEKS", "8")))
+    short_sale_back_days = max(0, int(os.environ.get("SHORT_SALE_LOOKBACK_DAYS", str(ss_weeks * 7 + 14))))
     ss_sleep = float(os.environ.get("SHORT_SALE_SLEEP", "1.2"))
     codes_set = set(universe_df["Code"].astype(str)) if not universe_df.empty else set()
     ss_frames: list[pd.DataFrame] = []
@@ -334,6 +336,7 @@ def main() -> None:
             ss_df,
             ["ShortPositionsToSharesOutstandingRatio", "ShortPositionsInSharesNumber"],
         )
+        ss_pool_df = ss_df.copy()  # 週次スナップショット用に生プールを保持
         print(
             f"short_sale: pool rows={len(ss_df)} lookback_days={short_sale_back_days} "
             f"(全市場→各 inst_key 最新1行→銘柄合算→universe のみ出力)"
@@ -374,6 +377,23 @@ def main() -> None:
                 "ShortPositionsInSharesNumber",
             ]
         ].copy()
+
+        # 週次スナップショット: ShortSale_WkSeq01（最古）〜WkSeqNN（直近）
+        ss_fridays: list[date] = []
+        _d_fr = _last_friday(today)
+        for _ in range(ss_weeks):
+            ss_fridays.append(_d_fr)
+            _d_fr = _d_fr - timedelta(days=7)
+        ss_weekly_df = aggregate_short_sale_weekly_snapshots(
+            ss_pool_df, ss_fridays, n_weeks=ss_weeks
+        )
+        if codes_set:
+            ss_weekly_df = ss_weekly_df[ss_weekly_df["Code"].astype(str).isin(codes_set)]
+        ss_df = ss_df.merge(ss_weekly_df, on="Code", how="left")
+        print(
+            f"short_sale_weekly: weeks={ss_weeks} "
+            f"cols={[c for c in ss_df.columns if c.startswith('ShortSale_WkSeq')]}"
+        )
 
     # 2) fins/statements (v2: fins/summary) latest per Code
     statement_latest_rows: list[pd.DataFrame] = []

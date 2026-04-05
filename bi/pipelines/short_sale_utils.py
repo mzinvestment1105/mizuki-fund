@@ -93,3 +93,80 @@ def aggregate_short_sale_monthly_pool(
         .reset_index()
     )
     return inst_dedup, total_shares, ratio_max
+
+
+def aggregate_short_sale_weekly_snapshots(
+    ss_df: pd.DataFrame,
+    fridays: list,
+    *,
+    shares_col: str = "ShortPositionsInSharesNumber",
+    query_disc_col: str = QUERY_DISC_DATE_COL,
+    n_weeks: int = 8,
+) -> pd.DataFrame:
+    """
+    各週アンカー（金曜日）時点での空売り総量スナップショットを計算し、
+    Code × ShortSale_WkSeq01〜WkSeqNN の列構造で返す。
+
+    WkSeq01 = 最古週、WkSeqNN = 最新週（fridays[0] = 直近金曜）。
+    """
+    import datetime
+
+    if ss_df.empty or not fridays:
+        return pd.DataFrame(columns=["Code"])
+
+    work = ss_df.copy()
+
+    # DiscDate / CalcDate を datetime に変換
+    for k in ["DiscDate", "CalcDate"]:
+        if k in work.columns:
+            work[k] = pd.to_datetime(work[k], errors="coerce")
+
+    if query_disc_col in work.columns:
+        work["_qd_dt"] = pd.to_datetime(work[query_disc_col], errors="coerce")
+    else:
+        work["_qd_dt"] = pd.NaT
+
+    # inst_key 構築
+    def _as_str(col: str) -> "pd.Series":
+        if col not in work.columns:
+            return pd.Series([""] * len(work), index=work.index)
+        return work[col].fillna("").astype(str)
+
+    work["inst_key"] = _as_str("DiscretionaryInvestmentContractorName") + "|" + _as_str("SSAddr") + "|" + _as_str("FundName")
+    work = fix_degenerate_inst_keys(work)
+
+    # ソート基準: DiscDate → CalcDate → _qd_dt
+    sort_keys = [k for k in ["DiscDate", "CalcDate", "_qd_dt"] if k in work.columns]
+    if sort_keys:
+        work = work.sort_values(sort_keys, kind="mergesort")
+
+    # 各週アンカー時点のスナップショットを計算
+    # fridays[0] = 直近（WkSeqNN）、fridays[-1] = 最古（WkSeq01）
+    snap_cols: dict[str, "pd.Series"] = {}
+    for i, anchor in enumerate(fridays):
+        seq = n_weeks - i  # fridays[0] → WkSeq08、fridays[7] → WkSeq01
+        col = f"ShortSale_WkSeq{seq:02d}"
+
+        anchor_dt = pd.Timestamp(anchor) + pd.Timedelta(days=1)  # その週の金曜EOD
+        mask = work["_qd_dt"] <= anchor_dt
+        sub = work[mask]
+        if sub.empty:
+            snap_cols[col] = pd.Series(dtype=float)
+            continue
+
+        # (Code, inst_key) ごとに最新行 → 銘柄合算
+        deduped = sub.groupby(["Code", "inst_key"], as_index=False).tail(1)
+        totals = (
+            deduped.groupby("Code")[shares_col]
+            .sum(min_count=1)
+            .rename(col)
+        )
+        snap_cols[col] = totals
+
+    if not snap_cols:
+        return pd.DataFrame(columns=["Code"])
+
+    result = pd.DataFrame(snap_cols)
+    result.index.name = "Code"
+    result = result.reset_index()
+    return result

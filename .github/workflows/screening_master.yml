@@ -36,7 +36,7 @@ jobs:
           YFINANCE_STATEMENT_FALLBACK: "1"
           MARGIN_INTEREST_LOOKBACK_WEEKS: "8"
           MARGIN_INTEREST_DAY_FALLBACK: "2"
-          SHORT_SALE_LOOKBACK_DAYS: "30"
+          SHORT_SALE_LOOKBACK_WEEKS: "8"
         run: |
           set -o pipefail
           cd bi/pipelines
