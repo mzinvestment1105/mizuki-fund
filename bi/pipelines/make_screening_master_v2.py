@@ -747,14 +747,15 @@ def main() -> None:
         px_close_df = px_latest_df[["Code", "Close"]].copy()
         px_close_df = px_close_df.drop_duplicates("Code", keep="last")
 
-    # 全期間の出来高（Vo）を収集: (Code, day_idx) で管理
+    # 全期間の出来高（Vo）・売買代金（Va）を収集: (Code, day_idx) で管理
     # day_idx=0が直近、day_idx=vol_days_total-1が最古
     vo_frames: list[pd.DataFrame] = []
     # latest day は Close 用に取得済みレスポンスから流用
     if not px_latest_df.empty and "Vo" in px_latest_df.columns:
         df_latest_vo = px_latest_df.copy()
-        df_latest_vo = _to_numeric_df(df_latest_vo, ["Vo"])
-        df_latest_vo = df_latest_vo[["Code", "Vo"]].drop_duplicates("Code", keep="last")
+        _vo_va_cols = [c for c in ["Vo", "Va"] if c in df_latest_vo.columns]
+        df_latest_vo = _to_numeric_df(df_latest_vo, _vo_va_cols)
+        df_latest_vo = df_latest_vo[["Code"] + _vo_va_cols].drop_duplicates("Code", keep="last")
         df_latest_vo["_day_idx"] = 0
         vo_frames.append(df_latest_vo)
 
@@ -773,8 +774,9 @@ def main() -> None:
             raise ValueError("equities/bars/daily missing Vo (volume) column")
         df_day = df_day.copy()
         df_day["Code"] = df_day["Code"].map(_normalize_code_4).astype(str)
-        df_day = _to_numeric_df(df_day, ["Vo"])
-        df_day = df_day[["Code", "Vo"]].drop_duplicates("Code", keep="last")
+        _vo_va_cols = [c for c in ["Vo", "Va"] if c in df_day.columns]
+        df_day = _to_numeric_df(df_day, _vo_va_cols)
+        df_day = df_day[["Code"] + _vo_va_cols].drop_duplicates("Code", keep="last")
         df_day["_day_idx"] = day_idx
         vo_frames.append(df_day)
 
@@ -783,42 +785,52 @@ def main() -> None:
         # ブロックインデックス: day_idx 0〜4→block0(直近), 5〜9→block1, ...
         vo_all["_block"] = vo_all["_day_idx"] // 5
 
-        # AvgDailyVolume5d = block0（直近5日）の平均（後方互換）
-        avg_df = (
-            vo_all[vo_all["_block"] == 0]
-            .groupby("Code", as_index=False)["Vo"]
-            .mean()
-            .rename(columns={"Vo": "AvgDailyVolume5d"})
-        )
-
-        # VolAvg5d_BlkSeq01（最古）〜BlkSeqNN（直近）の列展開
-        vol_block_cols: list[str] = []
-        vol_avg_pivot = pd.DataFrame()
-        for seq in range(1, vol_blocks + 1):
-            blk = vol_blocks - seq  # block 0=直近=SeqNN, vol_blocks-1=最古=Seq01
-            col = f"VolAvg5d_BlkSeq{seq:02d}"
-            vol_block_cols.append(col)
-            blk_avg = (
-                vo_all[vo_all["_block"] == blk]
-                .groupby("Code", as_index=False)["Vo"]
+        def _build_block_pivot(all_df: pd.DataFrame, raw_col: str, out_prefix: str, n: int) -> tuple[pd.DataFrame, str]:
+            """raw_col の5日平均をブロック展開。後方互換列名も返す。"""
+            if raw_col not in all_df.columns:
+                return pd.DataFrame(columns=["Code"]), ""
+            compat_col = f"AvgDaily{'Volume' if raw_col == 'Vo' else 'Value'}5d"
+            compat_df = (
+                all_df[all_df["_block"] == 0]
+                .groupby("Code", as_index=False)[raw_col]
                 .mean()
-                .rename(columns={"Vo": col})
+                .rename(columns={raw_col: compat_col})
             )
-            if vol_avg_pivot.empty:
-                vol_avg_pivot = blk_avg
-            else:
-                vol_avg_pivot = vol_avg_pivot.merge(blk_avg, on="Code", how="outer")
+            pivot = pd.DataFrame()
+            for seq in range(1, n + 1):
+                blk = n - seq
+                col = f"{out_prefix}_BlkSeq{seq:02d}"
+                blk_avg = (
+                    all_df[all_df["_block"] == blk]
+                    .groupby("Code", as_index=False)[raw_col]
+                    .mean()
+                    .rename(columns={raw_col: col})
+                )
+                pivot = blk_avg if pivot.empty else pivot.merge(blk_avg, on="Code", how="outer")
+            result = compat_df.merge(pivot, on="Code", how="outer") if not pivot.empty else compat_df
+            return result, compat_col
 
-        print(f"volume_blocks: {vol_blocks}ブロック×5日 cols={vol_block_cols}")
+        vol_pivot, _ = _build_block_pivot(vo_all, "Vo", "VolAvg5d", vol_blocks)
+        val_pivot, _ = _build_block_pivot(vo_all, "Va", "ValAvg5d", vol_blocks)
+        print(
+            f"volume_blocks: {vol_blocks}ブロック×5日 "
+            f"Vo cols={[c for c in vol_pivot.columns if 'BlkSeq' in c]} "
+            f"Va cols={[c for c in val_pivot.columns if 'BlkSeq' in c]}"
+        )
     else:
-        avg_df = pd.DataFrame(columns=["Code", "AvgDailyVolume5d"])
-        vol_avg_pivot = pd.DataFrame(columns=["Code"])
-        vol_block_cols = []
+        vol_pivot = pd.DataFrame(columns=["Code", "AvgDailyVolume5d"])
+        val_pivot = pd.DataFrame(columns=["Code", "AvgDailyValue5d"])
 
-    # Merge: Close + AvgDailyVolume5d + VolAvg5d_BlkSeq01〜NN
+    # AvgDailyVolume5d / AvgDailyValue5d を単独列として保持（後方互換）
+    avg_df = vol_pivot[["Code", "AvgDailyVolume5d"]].copy() if "AvgDailyVolume5d" in vol_pivot.columns else pd.DataFrame(columns=["Code", "AvgDailyVolume5d"])
+
+    # Merge: Close + AvgDailyVolume5d + VolAvg5d_BlkSeq + ValAvg5d_BlkSeq
     px_df = px_close_df.merge(avg_df, on="Code", how="left")
-    if not vol_avg_pivot.empty:
-        px_df = px_df.merge(vol_avg_pivot, on="Code", how="left")
+    if not vol_pivot.empty:
+        px_df = px_df.merge(vol_pivot, on="Code", how="left", suffixes=("", "_dup"))
+        px_df = px_df[[c for c in px_df.columns if not c.endswith("_dup")]]
+    if not val_pivot.empty:
+        px_df = px_df.merge(val_pivot, on="Code", how="left")
 
     # Left join: start from universe
     master = universe_df.merge(statements_df, on="Code", how="left")
@@ -938,6 +950,15 @@ def main() -> None:
         "VolAvg5d_BlkSeq06",
         "VolAvg5d_BlkSeq07",
         "VolAvg5d_BlkSeq08",
+        "AvgDailyValue5d",
+        "ValAvg5d_BlkSeq01",
+        "ValAvg5d_BlkSeq02",
+        "ValAvg5d_BlkSeq03",
+        "ValAvg5d_BlkSeq04",
+        "ValAvg5d_BlkSeq05",
+        "ValAvg5d_BlkSeq06",
+        "ValAvg5d_BlkSeq07",
+        "ValAvg5d_BlkSeq08",
         "AnnouncementDate",
         "FiscalQuarter",
         "FiscalYear",
