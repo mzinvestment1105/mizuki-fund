@@ -1,13 +1,14 @@
-name: スクリーニングマスター更新
+name: セクター週次レポート生成
 
 "on":
-  schedule:
-    - cron: '0 10 * * 1-5'   # 毎週月〜金 19:00 JST（UTC+9）混雑ピーク（:30分台）を回避
-  workflow_dispatch:          # 手動実行ボタン（GitHub UI から即時実行可）
+  # schedule:
+  #   - cron: '0 11 * * 6'  # 毎週土曜 20:00 JST（市場クローズ後）
+  workflow_dispatch:         # 手動実行（GitHub UI から）
 
 jobs:
-  update:
+  build:
     runs-on: ubuntu-latest
+    timeout-minutes: 360    # 初回全取得は最大6時間
 
     steps:
       - name: チェックアウト
@@ -25,47 +26,37 @@ jobs:
       - name: 依存ライブラリのインストール
         run: pip install -r bi/pipelines/requirements.txt
 
-      - name: outputs ディレクトリの準備
-        run: mkdir -p bi/outputs
+      - name: 価格キャッシュの復元
+        uses: actions/cache@v4
+        with:
+          path: bi/data/raw/sector_prices.parquet
+          key: sector-prices-${{ runner.os }}-${{ hashFiles('bi/data/universe/prime_list.csv') }}
+          restore-keys: |
+            sector-prices-${{ runner.os }}-
 
-      - name: ETL 実行
-        id: etl
+      - name: outputs / data ディレクトリの準備
+        run: |
+          mkdir -p bi/outputs
+          mkdir -p bi/data/raw
+
+      - name: セクターETL 実行
         env:
           JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
           PYTHONIOENCODING: utf-8
-          YFINANCE_STATEMENT_FALLBACK: "1"
-          MARGIN_INTEREST_LOOKBACK_WEEKS: "8"
-          MARGIN_INTEREST_DAY_FALLBACK: "2"
-          SHORT_SALE_LOOKBACK_WEEKS: "8"
-          VOLUME_BLOCK_WEEKS: "8"
         run: |
           set -o pipefail
           cd bi/pipelines
-          python make_screening_master_v2.py 2>&1 | tee /tmp/etl.log
-
-          # サマリ抽出（Discord通知用）
-          ROWS=$(grep -oP 'rows=\K[0-9]+' /tmp/etl.log | tail -1 || echo "?")
-          YF=$(grep -oP 'yf_used=\K[0-9]+' /tmp/etl.log | tail -1 || echo "?")
-          echo "rows=$ROWS"   >> $GITHUB_OUTPUT
-          echo "yf_used=$YF" >> $GITHUB_OUTPUT
-
-      - name: Excel 変換
-        env:
-          PYTHONIOENCODING: utf-8
-        run: |
-          cd bi/pipelines
-          python convert_to_excel.py
+          python make_sector_report.py 2>&1 | tee /tmp/sector_etl.log
 
       - name: 出力ファイルをコミット
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add bi/outputs/
+          git add bi/outputs/sector_stock_weekly.parquet bi/outputs/sector_weekly.parquet
           if ! git diff --staged --quiet; then
-            git commit -m "data: screening master $(date +'%Y-%m-%d')"
+            git commit -m "data: sector weekly $(date +'%Y-%m-%d')"
             git fetch origin master
             if ! git rebase origin/master; then
-              # バイナリファイルの衝突はETL生成物（新しい方）を優先して解決
               git diff --name-only --diff-filter=U | xargs -I{} git checkout --theirs {}
               git diff --name-only --diff-filter=U | xargs git add
               git -c core.editor=true rebase --continue
@@ -78,9 +69,16 @@ jobs:
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
+          SECTORS=$(python3 -c "
+          import pandas as pd
+          df = pd.read_parquet('bi/outputs/sector_weekly.parquet')
+          top = df.nlargest(3, 'Return_W01')[['Sector17CodeName','Return_W01']]
+          lines = [f\"{r['Sector17CodeName']} {r['Return_W01']*100:.1f}%\" for _,r in top.iterrows()]
+          print(' | '.join(lines))
+          " 2>/dev/null || echo "集計失敗")
           curl -s -X POST "$DISCORD_WEBHOOK_URL" \
             -H "Content-Type: application/json" \
-            -d "{\"content\": \"✅ スクリーニング完了\n$(date +'%Y-%m-%d %H:%M') JST\n銘柄数: ${{ steps.etl.outputs.rows }}\nYF補完: ${{ steps.etl.outputs.yf_used }}銘柄\"}"
+            -d "{\"content\": \"📊 セクター週次レポート完了\n$(date +'%Y-%m-%d') JST\n週次上位: ${SECTORS}\"}"
 
       - name: Discord 通知（失敗）
         if: failure()
@@ -89,4 +87,4 @@ jobs:
         run: |
           curl -s -X POST "$DISCORD_WEBHOOK_URL" \
             -H "Content-Type: application/json" \
-            -d "{\"content\": \"❌ スクリーニング失敗\n$(date +'%Y-%m-%d %H:%M') JST\nログを確認: https://github.com/${{ github.repository }}/actions\"}"
+            -d "{\"content\": \"❌ セクターETL失敗\n$(date +'%Y-%m-%d %H:%M') JST\nhttps://github.com/${{ github.repository }}/actions\"}"

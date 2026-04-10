@@ -1,8 +1,10 @@
 name: マクロレポート日次生成
 
+# Claude API（ANTHROPIC_API_KEY）が使える状態になるまで、定期実行は停止。
+# 再開するときは下の schedule のコメントを外す。
 on:
-  schedule:
-    - cron: '30 9 * * *'   # 09:30 UTC = 18:30 JST（東京市場引け後）
+  # schedule:
+  #   - cron: '30 9 * * *'   # 09:30 UTC = 18:30 JST（東京市場引け後）
   workflow_dispatch:
     inputs:
       date:
