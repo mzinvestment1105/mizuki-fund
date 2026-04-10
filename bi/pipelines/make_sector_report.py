@@ -6,11 +6,14 @@
   bi/outputs/sector_weekly.parquet        … Sector17 集計
 
 価格キャッシュ:
-  bi/data/raw/sector_prices.parquet       … 全銘柄日次終値（増分更新）
+  bi/data/raw/sector_prices.parquet       … 全銘柄日次OHLCV（増分更新）
+
+投資主体別売買:
+  bi/data/raw/tse_investor_trading.parquet … 東証全体の週次データ
 
 実行:
   cd bi/pipelines
-  python make_sector_report.py [--limit-codes N] [--skip-price-fetch]
+  python make_sector_report.py [--limit-codes N] [--skip-price-fetch] [--skip-investor-fetch]
 
 環境変数:
   JQUANTS_API_KEY  … 必須
@@ -19,6 +22,7 @@
 from __future__ import annotations
 
 import argparse
+import io
 import os
 import time
 import uuid
@@ -26,6 +30,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
+import requests
 
 from jq_client_utils import (
     fetch_paginated_v2,
@@ -40,17 +45,21 @@ OUTPUTS_DIR = BASE_DIR / ".." / "outputs"
 DATA_RAW_DIR = BASE_DIR / ".." / "data" / "raw"
 SCREENING_MASTER_PATH = OUTPUTS_DIR / "screening_master.parquet"
 PRICE_CACHE_PATH = DATA_RAW_DIR / "sector_prices.parquet"
+INVESTOR_CACHE_PATH = DATA_RAW_DIR / "tse_investor_trading.parquet"
 OUT_STOCK_PATH = OUTPUTS_DIR / "sector_stock_weekly.parquet"
 OUT_SECTOR_PATH = OUTPUTS_DIR / "sector_weekly.parquet"
 
 # ---------------------------------------------------------------------------
 # 定数
 # ---------------------------------------------------------------------------
-LOOKBACK_YEARS = 3          # 価格キャッシュの取得範囲
-WEEKLY_SLOTS = 8            # 週次スロット数（W01=最新週）
+LOOKBACK_YEARS = 3
+WEEKLY_SLOTS = 8
 SNAPSHOT_LABELS = ["3M", "6M", "1Y", "2Y", "3Y"]
-SNAPSHOT_DAYS   = [63,   126,  252,  504,  756]   # 営業日近似
-REQUEST_SLEEP   = 1.2       # API リクエスト間隔(秒)
+SNAPSHOT_DAYS   = [63,   126,  252,  504,  756]
+REQUEST_SLEEP   = 1.2
+
+# 東証投資主体別売買データURL（週次CSV、東証公開）
+TSE_INVESTOR_URL = "https://www.jpx.co.jp/markets/statistics-equities/investor-type/b7gje6000000p9ov-att/investors.csv"
 
 
 # ---------------------------------------------------------------------------
@@ -58,30 +67,16 @@ REQUEST_SLEEP   = 1.2       # API リクエスト間隔(秒)
 # ---------------------------------------------------------------------------
 
 def _last_friday(d: date) -> date:
-    """d 以前で最も近い金曜日（d が金曜なら d 自身）。"""
     offset = (d.weekday() - 4) % 7
     return d - timedelta(days=offset)
 
 
 def _prior_friday(d: date, n: int) -> date:
-    """_last_friday(d) の n 週前の金曜日。"""
-    fri = _last_friday(d)
-    return fri - timedelta(weeks=n)
-
-
-def _nearest_close(prices: pd.DataFrame, target: date, tolerance_days: int = 7) -> pd.Series | None:
-    """target 日に最も近い（前方向）終値行を返す。なければ None。"""
-    sub = prices[prices["Date"] <= pd.Timestamp(target)]
-    if sub.empty:
-        return None
-    row = sub.iloc[-1]
-    if (target - row["Date"].date()).days > tolerance_days:
-        return None
-    return row
+    return _last_friday(d) - timedelta(weeks=n)
 
 
 # ---------------------------------------------------------------------------
-# Step 1: 価格キャッシュ（増分更新）
+# Step 1: 価格キャッシュ（OHLCV、増分更新）
 # ---------------------------------------------------------------------------
 
 def _load_price_cache() -> pd.DataFrame:
@@ -90,7 +85,7 @@ def _load_price_cache() -> pd.DataFrame:
         df["Date"] = pd.to_datetime(df["Date"])
         df["Code"] = df["Code"].astype("string")
         return df
-    return pd.DataFrame(columns=["Date", "Code", "C"])
+    return pd.DataFrame(columns=["Date", "Code", "O", "H", "L", "C", "V"])
 
 
 def _save_price_cache(df: pd.DataFrame) -> None:
@@ -98,15 +93,7 @@ def _save_price_cache(df: pd.DataFrame) -> None:
     df.to_parquet(PRICE_CACHE_PATH, index=False)
 
 
-def fetch_price_history(
-    codes: list[str],
-    *,
-    limit_codes: int = 0,
-) -> pd.DataFrame:
-    """
-    JQuants から全銘柄の日次終値を取得し、キャッシュに増分追記して返す。
-    既存キャッシュより新しい日付のみ API 取得する。
-    """
+def fetch_price_history(codes: list[str], *, limit_codes: int = 0) -> pd.DataFrame:
     import jquantsapi
 
     api_key = os.environ.get("JQUANTS_API_KEY", "").strip()
@@ -122,7 +109,6 @@ def fetch_price_history(
     if not cache.empty and "Date" in cache.columns:
         cached_max = cache["Date"].max().date()
         if cached_max >= fetch_from:
-            # キャッシュが既にある場合は翌日から増分取得
             fetch_from = cached_max + timedelta(days=1)
 
     today = date.today()
@@ -146,26 +132,38 @@ def fetch_price_history(
                     "date_from": fetch_from.strftime("%Y-%m-%d"),
                     "date_to": today.strftime("%Y-%m-%d"),
                 },
-                sleep_seconds=0,  # 上でsleepしているのでここは0
+                sleep_seconds=0,
             )
             if not rows:
                 continue
             df = pd.DataFrame(rows)
-            if "Date" not in df.columns or "C" not in df.columns:
-                # カラム名が違う場合の吸収
-                col_map = {}
-                for col in df.columns:
-                    if col.lower() in ("close", "c"):
-                        col_map[col] = "C"
-                    if col.lower() == "date":
-                        col_map[col] = "Date"
-                df = df.rename(columns=col_map)
-            if "C" not in df.columns:
+
+            # カラム正規化
+            col_map = {}
+            for col in df.columns:
+                cl = col.lower()
+                if cl in ("open", "o"):      col_map[col] = "O"
+                elif cl in ("high", "h"):    col_map[col] = "H"
+                elif cl in ("low", "l"):     col_map[col] = "L"
+                elif cl in ("close", "c"):   col_map[col] = "C"
+                elif cl in ("volume", "vo", "v"): col_map[col] = "V"
+                elif cl == "date":           col_map[col] = "Date"
+            df = df.rename(columns=col_map)
+
+            needed = ["Date", "C"]
+            if not all(c in df.columns for c in needed):
                 continue
+
+            for col in ["O", "H", "L", "C", "V"]:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
+                else:
+                    df[col] = float("nan")
+
             df["Code"] = code
             df["Date"] = pd.to_datetime(df["Date"])
-            df["C"] = pd.to_numeric(df["C"], errors="coerce")
-            frames.append(df[["Date", "Code", "C"]])
+            frames.append(df[["Date", "Code", "O", "H", "L", "C", "V"]])
+
         except Exception as e:
             failures.append(f"{code}: {e}")
 
@@ -189,16 +187,64 @@ def fetch_price_history(
 
 
 # ---------------------------------------------------------------------------
-# Step 2: 週次終値・リターン計算（銘柄別）
+# Step 2: 投資主体別売買（東証全体、週次）
 # ---------------------------------------------------------------------------
 
-def compute_stock_returns(
-    prices: pd.DataFrame,
-    today: date,
-) -> pd.DataFrame:
+def fetch_investor_trading(*, skip: bool = False) -> pd.DataFrame:
     """
-    銘柄ごとに週次終値スナップショットとリターンを計算。
-    prices: Date(datetime64), Code(string), C(float)
+    東証公開の投資主体別売買データを取得・キャッシュ。
+    カラム: Week（週末日）, 外国人_買, 外国人_売, 外国人_差引, 個人_買, 個人_売, 個人_差引,
+            信託銀行_買, 信託銀行_売, 信託銀行_差引, 事業法人_買, 事業法人_売, 事業法人_差引
+    """
+    if skip and INVESTOR_CACHE_PATH.exists():
+        df = pd.read_parquet(INVESTOR_CACHE_PATH)
+        df["Week"] = pd.to_datetime(df["Week"])
+        print(f"投資主体データ: キャッシュ読み込み ({len(df)} 行)")
+        return df
+
+    print("投資主体別売買データ取得中...")
+    try:
+        resp = requests.get(TSE_INVESTOR_URL, timeout=30)
+        resp.raise_for_status()
+        # 東証CSVはShift-JIS
+        raw = resp.content.decode("shift-jis", errors="replace")
+        df_raw = pd.read_csv(io.StringIO(raw), header=None, skiprows=1)
+
+        # 東証CSVの列構造を解析して整形
+        # 実際のCSVフォーマットに合わせてパース（列数・構造が変わる場合あり）
+        # ここでは汎用的にカラムを割り当て
+        if df_raw.empty:
+            raise ValueError("投資主体データが空です")
+
+        # 週列（最初の列）を Week として扱う
+        df_raw.columns = [f"col{i}" for i in range(len(df_raw.columns))]
+        df_raw["Week"] = pd.to_datetime(df_raw["col0"], errors="coerce")
+        df_raw = df_raw.dropna(subset=["Week"])
+
+        # 数値列を抽出（外国人・個人・信託・事業法人の買/売/差引）
+        # 列インデックスは東証のフォーマット次第なので、取得できた列をそのまま保存
+        numeric_cols = [c for c in df_raw.columns if c != "Week" and c != "col0"]
+        for c in numeric_cols:
+            df_raw[c] = pd.to_numeric(df_raw[c], errors="coerce")
+
+        df_raw = df_raw.sort_values("Week").reset_index(drop=True)
+        INVESTOR_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        df_raw.to_parquet(INVESTOR_CACHE_PATH, index=False)
+        print(f"投資主体データ保存: {len(df_raw)} 行")
+        return df_raw
+
+    except Exception as e:
+        print(f"投資主体データ取得失敗（スキップ）: {e}")
+        return pd.DataFrame()
+
+
+# ---------------------------------------------------------------------------
+# Step 3: 銘柄別指標計算（OHLCV → リターン・ボラ・MA・出来高等）
+# ---------------------------------------------------------------------------
+
+def compute_stock_metrics(prices: pd.DataFrame, today: date) -> pd.DataFrame:
+    """
+    銘柄ごとにOHLCVから全指標を計算。
     """
     prices = prices.copy()
     prices["Date"] = pd.to_datetime(prices["Date"])
@@ -209,27 +255,28 @@ def compute_stock_returns(
     total = len(codes)
 
     for i, code in enumerate(codes, 1):
-        sub = prices[prices["Code"] == code].set_index("Date")["C"]
-        if sub.empty:
+        sub = prices[prices["Code"] == code].copy().set_index("Date")
+        if sub.empty or "C" not in sub.columns:
             continue
+
+        close = sub["C"]
+        volume = sub["V"] if "V" in sub.columns else pd.Series(dtype=float)
+        high = sub["H"] if "H" in sub.columns else pd.Series(dtype=float)
+        low = sub["L"] if "L" in sub.columns else pd.Series(dtype=float)
 
         row: dict = {"Code": str(code)}
 
         # 最新終値
-        latest_close = sub.iloc[-1]
+        latest_close = close.iloc[-1]
         row["Close_Latest"] = latest_close
 
-        # 週次スロット W01〜W08（W01=最新週の週末）
+        # 週次スロット終値 W01〜W08
         for w in range(1, WEEKLY_SLOTS + 1):
             target = _prior_friday(today, w - 1)
-            # target 以前で最も近い日の終値
-            sub_before = sub[sub.index <= pd.Timestamp(target)]
-            if sub_before.empty:
-                row[f"Close_W{w:02d}"] = float("nan")
-            else:
-                row[f"Close_W{w:02d}"] = sub_before.iloc[-1]
+            sub_before = close[close.index <= pd.Timestamp(target)]
+            row[f"Close_W{w:02d}"] = sub_before.iloc[-1] if not sub_before.empty else float("nan")
 
-        # 週次リターン（W01 = 直近の1週リターン = W01終値/W02終値 - 1）
+        # 週次リターン
         for w in range(1, WEEKLY_SLOTS + 1):
             c_cur = row.get(f"Close_W{w:02d}", float("nan"))
             c_prev = row.get(f"Close_W{w+1:02d}", float("nan"))
@@ -238,75 +285,124 @@ def compute_stock_returns(
             else:
                 row[f"Return_W{w:02d}"] = float("nan")
 
-        # スナップショット終値・リターン（3M/6M/1Y/2Y/3Y）
+        # スナップショットリターン（3M/6M/1Y/2Y/3Y）
         for label, bdays in zip(SNAPSHOT_LABELS, SNAPSHOT_DAYS):
             target = today - timedelta(days=int(bdays * 365 / 252))
-            sub_before = sub[sub.index <= pd.Timestamp(target)]
+            sub_before = close[close.index <= pd.Timestamp(target)]
             if sub_before.empty:
                 row[f"Close_{label}"] = float("nan")
                 row[f"Return_{label}"] = float("nan")
             else:
                 snap_close = sub_before.iloc[-1]
                 row[f"Close_{label}"] = snap_close
-                if snap_close != 0 and pd.notna(snap_close) and pd.notna(latest_close):
-                    row[f"Return_{label}"] = latest_close / snap_close - 1
-                else:
-                    row[f"Return_{label}"] = float("nan")
+                row[f"Return_{label}"] = (latest_close / snap_close - 1) if snap_close != 0 and pd.notna(snap_close) else float("nan")
+
+        # --- ボラティリティ（過去20営業日の日次リターンσ、年率換算） ---
+        daily_ret = close.pct_change().dropna()
+        if len(daily_ret) >= 5:
+            row["Volatility_20d"] = daily_ret.tail(20).std() * (252 ** 0.5)
+        else:
+            row["Volatility_20d"] = float("nan")
+
+        # --- 移動平均乖離率（25日・75日） ---
+        if len(close) >= 25:
+            ma25 = close.tail(25).mean()
+            row["MA25_Deviation"] = (latest_close / ma25 - 1) if ma25 != 0 else float("nan")
+        else:
+            row["MA25_Deviation"] = float("nan")
+
+        if len(close) >= 75:
+            ma75 = close.tail(75).mean()
+            row["MA75_Deviation"] = (latest_close / ma75 - 1) if ma75 != 0 else float("nan")
+        else:
+            row["MA75_Deviation"] = float("nan")
+
+        # --- 52週高値・安値比 ---
+        last_252 = close.tail(252)
+        if not last_252.empty:
+            w52_high = last_252.max()
+            w52_low = last_252.min()
+            row["52W_High"] = w52_high
+            row["52W_Low"] = w52_low
+            row["52W_High_Ratio"] = (latest_close / w52_high - 1) if w52_high != 0 else float("nan")
+            row["52W_Low_Ratio"] = (latest_close / w52_low - 1) if w52_low != 0 else float("nan")
+        else:
+            row["52W_High"] = row["52W_Low"] = row["52W_High_Ratio"] = row["52W_Low_Ratio"] = float("nan")
+
+        # --- 出来高変化率（直近1週 vs 4週前） ---
+        if not volume.empty:
+            fri_latest = _prior_friday(today, 0)
+            fri_4w = _prior_friday(today, 4)
+
+            vol_w1 = volume[(volume.index > pd.Timestamp(_prior_friday(today, 1))) &
+                            (volume.index <= pd.Timestamp(fri_latest))].mean()
+            vol_w4 = volume[(volume.index > pd.Timestamp(_prior_friday(today, 5))) &
+                            (volume.index <= pd.Timestamp(fri_4w))].mean()
+
+            row["Volume_W01_Avg"] = vol_w1
+            row["Volume_Change_W1vsW4"] = (vol_w1 / vol_w4 - 1) if pd.notna(vol_w4) and vol_w4 != 0 else float("nan")
+
+            # 直近5日平均出来高
+            row["Volume_Avg5d_Price"] = volume.tail(5).mean()
+        else:
+            row["Volume_W01_Avg"] = row["Volume_Change_W1vsW4"] = row["Volume_Avg5d_Price"] = float("nan")
 
         results.append(row)
 
         if i % 500 == 0 or i == total:
-            print(f"  リターン計算: {i}/{total}")
+            print(f"  指標計算: {i}/{total}")
 
     return pd.DataFrame(results)
 
 
 # ---------------------------------------------------------------------------
-# Step 3: スクリーニングマスターと結合
+# Step 4: スクリーニングマスターと結合
 # ---------------------------------------------------------------------------
 
 def build_stock_table(
-    returns_df: pd.DataFrame,
+    metrics_df: pd.DataFrame,
     master_df: pd.DataFrame,
+    investor_df: pd.DataFrame,
     today: date,
     etl_run_id: str,
     etl_started_jst: str,
 ) -> pd.DataFrame:
-    """
-    returns_df（リターン計算結果）と screening_master を結合して
-    sector_stock_weekly の全カラムを構築。
-    """
-    returns_df["Code"] = returns_df["Code"].astype("string")
+    metrics_df["Code"] = metrics_df["Code"].astype("string")
     master_df = master_df.copy()
     master_df["Code"] = master_df["Code"].astype("string").str.strip()
 
-    # ETL メタ除去（後で上書き）
     drop_meta = ["ETLRunId", "ETLStartedAtUTC", "ETLStartedAtJST"]
     master_df = master_df.drop(columns=[c for c in drop_meta if c in master_df.columns])
 
-    merged = returns_df.merge(master_df, on="Code", how="left")
+    merged = metrics_df.merge(master_df, on="Code", how="left")
 
     # 時価総額ウェイト（セクター内）
     merged["MarketCap"] = pd.to_numeric(merged.get("MarketCap", pd.Series(dtype=float)), errors="coerce")
     sector_mcap = merged.groupby("Sector17CodeName")["MarketCap"].transform("sum")
     merged["MarketCap_Weight"] = merged["MarketCap"] / sector_mcap
 
-    # 信用倍率（最新週）
+    # 信用倍率
     long_latest = pd.to_numeric(merged.get("LongMargin_WkSeq01", pd.Series(dtype=float)), errors="coerce")
     short_latest = pd.to_numeric(merged.get("ShortMargin_WkSeq01", pd.Series(dtype=float)), errors="coerce")
     merged["ShortMargin_Latest"] = short_latest
     merged["LongMargin_Latest"] = long_latest
-    with pd.option_context("mode.chained_assignment", None):
-        merged["MarginRatio"] = long_latest / short_latest.replace(0, float("nan"))
+    merged["MarginRatio"] = long_latest / short_latest.replace(0, float("nan"))
 
-    # セクター内リターン順位（Return_W01 基準）
+    # セクター内リターン順位
     merged["Return_Rank_InSector"] = (
         merged.groupby("Sector17CodeName")["Return_W01"]
         .rank(ascending=False, method="min", na_option="bottom")
         .astype("Int64")
     )
 
-    # メタ
+    # 投資主体別売買（東証全体・最新週）をメタとして付与
+    if not investor_df.empty and "Week" in investor_df.columns:
+        latest_inv = investor_df.sort_values("Week").iloc[-1]
+        for col in investor_df.columns:
+            if col != "Week":
+                merged[f"TSE_{col}"] = latest_inv[col]
+        merged["TSE_Week"] = latest_inv["Week"]
+
     merged["AsOf"] = today.isoformat()
     merged["ETLRunId"] = etl_run_id
     merged["ETLStartedAtJST"] = etl_started_jst
@@ -315,7 +411,7 @@ def build_stock_table(
 
 
 # ---------------------------------------------------------------------------
-# Step 4: セクター集計
+# Step 5: セクター集計
 # ---------------------------------------------------------------------------
 
 def build_sector_table(
@@ -324,8 +420,6 @@ def build_sector_table(
     etl_run_id: str,
     etl_started_jst: str,
 ) -> pd.DataFrame:
-    """sector_stock_weekly から Sector17 集計を作る。"""
-
     sectors = stock_df["Sector17CodeName"].dropna().unique()
     rows: list[dict] = []
 
@@ -336,56 +430,44 @@ def build_sector_table(
         row["StockCount"] = len(sg)
         row["MarketCap_Total"] = sg["MarketCap"].sum(skipna=True)
 
-        # 時価総額加重平均リターン
         w = sg["MarketCap_Weight"].fillna(0)
-        w_sum = w.sum()
 
+        def wavg(col: str) -> float:
+            if col not in sg.columns:
+                return float("nan")
+            sg[col] = pd.to_numeric(sg[col], errors="coerce")
+            valid = sg[col].notna() & (w > 0)
+            if not valid.any():
+                return float("nan")
+            return float((sg.loc[valid, col] * w[valid]).sum() / w[valid].sum())
+
+        # 週次・スナップショットリターン（加重平均）
         for wk in range(1, WEEKLY_SLOTS + 1):
-            col = f"Return_W{wk:02d}"
-            if col in sg.columns:
-                valid = sg[col].notna() & (w > 0)
-                if valid.any() and w_sum > 0:
-                    row[col] = (sg.loc[valid, col] * w[valid]).sum() / w[valid].sum()
-                else:
-                    row[col] = float("nan")
-
+            row[f"Return_W{wk:02d}"] = wavg(f"Return_W{wk:02d}")
         for label in SNAPSHOT_LABELS:
-            col = f"Return_{label}"
-            if col in sg.columns:
-                valid = sg[col].notna() & (w > 0)
-                if valid.any():
-                    row[col] = (sg.loc[valid, col] * w[valid]).sum() / w[valid].sum()
-                else:
-                    row[col] = float("nan")
+            row[f"Return_{label}"] = wavg(f"Return_{label}")
 
-        # 時価総額加重平均バリュエーション
-        for val_col, out_col in [
-            ("PER_Trailing", "PER_WAvg"),
-            ("PBR_Trailing", "PBR_WAvg"),
-            ("ROE_LatestYear", "ROE_WAvg"),
-        ]:
-            if val_col in sg.columns:
-                sg[val_col] = pd.to_numeric(sg[val_col], errors="coerce")
-                valid = sg[val_col].notna() & (w > 0)
-                if valid.any():
-                    row[out_col] = (sg.loc[valid, val_col] * w[valid]).sum() / w[valid].sum()
-                else:
-                    row[out_col] = float("nan")
+        # バリュエーション（加重平均）
+        row["PER_WAvg"] = wavg("PER_Trailing")
+        row["PBR_WAvg"] = wavg("PBR_Trailing")
+        row["ROE_WAvg"] = wavg("ROE_LatestYear")
 
-        # 上位3・下位3銘柄（Return_W01 基準、1ヶ月近似）
-        if "Return_W01" in sg.columns and "Return_W04" in sg.columns:
-            # 1ヶ月リターン = 4週累積
-            sg["_Return_1M"] = (
-                (1 + sg["Return_W01"].fillna(0))
-                * (1 + sg["Return_W02"].fillna(0))
-                * (1 + sg["Return_W03"].fillna(0))
-                * (1 + sg["Return_W04"].fillna(0))
-                - 1
-            )
-        else:
-            sg["_Return_1M"] = sg.get("Return_W01", float("nan"))
+        # テクニカル（加重平均）
+        row["Volatility_20d_WAvg"] = wavg("Volatility_20d")
+        row["MA25_Deviation_WAvg"] = wavg("MA25_Deviation")
+        row["MA75_Deviation_WAvg"] = wavg("MA75_Deviation")
+        row["Volume_Change_WAvg"] = wavg("Volume_Change_W1vsW4")
 
-        def _fmt(r: pd.Series) -> str:
+        # 1ヶ月リターン（4週累積）
+        sg["_Return_1M"] = (
+            (1 + sg.get("Return_W01", pd.Series(0, index=sg.index)).fillna(0))
+            * (1 + sg.get("Return_W02", pd.Series(0, index=sg.index)).fillna(0))
+            * (1 + sg.get("Return_W03", pd.Series(0, index=sg.index)).fillna(0))
+            * (1 + sg.get("Return_W04", pd.Series(0, index=sg.index)).fillna(0))
+            - 1
+        )
+
+        def _fmt(r: pd.DataFrame) -> str:
             parts = []
             for _, s in r.iterrows():
                 pct = f"{s['_Return_1M']*100:.1f}%" if pd.notna(s.get("_Return_1M")) else "N/A"
@@ -394,20 +476,17 @@ def build_sector_table(
             return " / ".join(parts)
 
         sorted_asc = sg.dropna(subset=["_Return_1M"]).sort_values("_Return_1M")
-        sorted_desc = sorted_asc[::-1]
-        row["Top3_Return_1M"] = _fmt(sorted_desc.head(3))
+        row["Top3_Return_1M"] = _fmt(sorted_asc[::-1].head(3))
         row["Bottom3_Return_1M"] = _fmt(sorted_asc.head(3))
 
-        # 時価総額上位3銘柄
         top3_mcap = sg.dropna(subset=["MarketCap"]).nlargest(3, "MarketCap")
         row["Top3_MarketCap"] = " / ".join(
             f"{r['Code']} {str(r.get('CompanyName', ''))[:10]}"
             for _, r in top3_mcap.iterrows()
         )
 
-        # 上位5銘柄の時価総額集中度
-        top5_mcap = sg.dropna(subset=["MarketCap"]).nlargest(5, "MarketCap")["MarketCap"].sum()
-        row["MarketCap_Ratio_Top5"] = top5_mcap / row["MarketCap_Total"] if row["MarketCap_Total"] > 0 else float("nan")
+        top5_sum = sg.dropna(subset=["MarketCap"]).nlargest(5, "MarketCap")["MarketCap"].sum()
+        row["MarketCap_Ratio_Top5"] = top5_sum / row["MarketCap_Total"] if row["MarketCap_Total"] > 0 else float("nan")
 
         row["AsOf"] = today.isoformat()
         row["ETLRunId"] = etl_run_id
@@ -423,69 +502,68 @@ def build_sector_table(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--limit-codes", type=int, default=0, help="テスト用: 取得銘柄数上限")
-    parser.add_argument("--skip-price-fetch", action="store_true", help="価格APIをスキップしてキャッシュのみ使用")
+    parser.add_argument("--limit-codes", type=int, default=0)
+    parser.add_argument("--skip-price-fetch", action="store_true")
+    parser.add_argument("--skip-investor-fetch", action="store_true")
     args = parser.parse_args()
 
     etl_run_id = str(uuid.uuid4())
     jst = timezone(timedelta(hours=9))
-    started_at = datetime.now(jst)
-    etl_started_jst = started_at.strftime("%Y-%m-%d %H:%M:%S JST")
+    etl_started_jst = datetime.now(jst).strftime("%Y-%m-%d %H:%M:%S JST")
     today = date.today()
 
     print(f"=== セクター週次レポート ETL ===")
     print(f"実行日: {today}  RunId: {etl_run_id}")
 
-    # --- ユニバース読み込み（screening_master から全銘柄取得）---
+    # ユニバース
     master_df = pd.read_parquet(SCREENING_MASTER_PATH)
     master_df["Code"] = master_df["Code"].astype("string").str.strip().str[:4]
     codes = master_df["Code"].dropna().unique().tolist()
     print(f"ユニバース: {len(codes)} 銘柄（全市場）")
 
-    # --- 価格キャッシュ取得 ---
+    # 価格キャッシュ
     if args.skip_price_fetch:
-        print("価格取得スキップ、キャッシュ読み込み")
+        print("価格取得スキップ")
         prices = _load_price_cache()
     else:
         prices = fetch_price_history(codes, limit_codes=args.limit_codes)
 
     if prices.empty:
         raise RuntimeError(
-            "価格データがありません。\n"
-            "初回は --skip-price-fetch なしで実行してください（全銘柄取得に数時間かかります）。\n"
+            "価格データがありません。--skip-price-fetch なしで実行してください。\n"
             f"キャッシュ保存先: {PRICE_CACHE_PATH}"
         )
 
     prices["Code"] = prices["Code"].astype("string").str.strip().str[:4]
     print(f"価格データ: {len(prices)} 行、銘柄 {prices['Code'].nunique()} 件")
 
-    # --- リターン計算 ---
-    print("リターン計算中...")
-    returns_df = compute_stock_returns(prices, today)
-    print(f"リターン計算完了: {len(returns_df)} 銘柄")
+    # 投資主体別売買
+    investor_df = fetch_investor_trading(skip=args.skip_investor_fetch)
 
-    print(f"スクリーニングマスター: {len(master_df)} 行")
+    # 銘柄別指標計算
+    print("指標計算中...")
+    metrics_df = compute_stock_metrics(prices, today)
+    print(f"指標計算完了: {len(metrics_df)} 銘柄")
 
-    # --- 銘柄テーブル構築 ---
+    # 結合
     print("銘柄テーブル構築中...")
-    stock_df = build_stock_table(returns_df, master_df, today, etl_run_id, etl_started_jst)
+    stock_df = build_stock_table(metrics_df, master_df, investor_df, today, etl_run_id, etl_started_jst)
 
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
     stock_df.to_parquet(OUT_STOCK_PATH, index=False)
     print(f"保存: {OUT_STOCK_PATH} ({len(stock_df)} 行, {len(stock_df.columns)} カラム)")
 
-    # --- セクター集計 ---
+    # セクター集計
     print("セクター集計中...")
     sector_df = build_sector_table(stock_df, today, etl_run_id, etl_started_jst)
-
     sector_df.to_parquet(OUT_SECTOR_PATH, index=False)
     print(f"保存: {OUT_SECTOR_PATH} ({len(sector_df)} 行, {len(sector_df.columns)} カラム)")
 
-    # --- サマリー表示 ---
+    # サマリー
     print("\n=== セクター集計サマリー ===")
-    display_cols = ["Sector17CodeName", "StockCount", "Return_W01", "Return_1Y", "PER_WAvg", "PBR_WAvg", "ROE_WAvg"]
-    display_cols = [c for c in display_cols if c in sector_df.columns]
-    print(sector_df[display_cols].to_string(index=False))
+    cols = ["Sector17CodeName", "StockCount", "Return_W01", "Return_1Y", "PER_WAvg", "PBR_WAvg", "ROE_WAvg"]
+    cols = [c for c in cols if c in sector_df.columns]
+    print(sector_df[cols].to_string(index=False))
     print("\n完了！")
 
 
