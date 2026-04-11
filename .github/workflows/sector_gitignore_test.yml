@@ -1,0 +1,23 @@
+name: gitignoreテスト（コミット検証）
+
+"on":
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: ダミーparquetを作成してgit addを検証
+        run: |
+          mkdir -p bi/outputs
+          echo "test" > bi/outputs/sector_weekly.parquet
+          echo "test" > bi/outputs/sector_stock_weekly.parquet
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add bi/outputs/sector_weekly.parquet bi/outputs/sector_stock_weekly.parquet
+          echo "git add 成功: gitignore問題なし"
+          git diff --staged --name-only
