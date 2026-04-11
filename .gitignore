@@ -22,6 +22,8 @@ bi/outputs/*.xlsx
 !bi/outputs/screening_master_data_gaps.xlsx
 !bi/outputs/yfinance_audit.parquet
 !bi/outputs/yfinance_audit.xlsx
+!bi/outputs/sector_weekly.parquet
+!bi/outputs/sector_stock_weekly.parquet
 bi/outputs/notion_sync_state.json
 
 # 旧ローカル作業の残骸（リポジトリには含めない。必要なら bi/pipelines を利用）
