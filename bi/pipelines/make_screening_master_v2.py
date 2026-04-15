@@ -884,6 +884,10 @@ def main() -> None:
         sleep_seconds=1.2,
     )
     px_latest_df = pd.DataFrame.from_records(latest_rows)
+    # 普通株（5桁コード末尾"0"）のみ残す。優先株・新株予約権等を除外することで
+    # normalize_code_4 後の重複（例: 94340/94345/94346 → 全部"9434"）を防ぐ
+    if not px_latest_df.empty and "Code" in px_latest_df.columns:
+        px_latest_df = px_latest_df[px_latest_df["Code"].astype(str).str.endswith("0")].copy()
     # Vo / Close ともに Code は 4桁正規化した値で揃える
     if not px_latest_df.empty and "Code" in px_latest_df.columns:
         px_latest_df = px_latest_df.copy()
@@ -922,6 +926,9 @@ def main() -> None:
             continue
         if "Vo" not in df_day.columns:
             raise ValueError("equities/bars/daily missing Vo (volume) column")
+        # 普通株（末尾"0"）のみ残す
+        if "Code" in df_day.columns:
+            df_day = df_day[df_day["Code"].astype(str).str.endswith("0")].copy()
         df_day = df_day.copy()
         df_day["Code"] = df_day["Code"].map(_normalize_code_4).astype(str)
         _vo_va_cols = [c for c in ["Vo", "Va"] if c in df_day.columns]
