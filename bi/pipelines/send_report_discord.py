@@ -25,10 +25,25 @@ _CHUNK_SIZE = 1900
 
 
 def find_latest_report(code: str) -> Path:
+    # 新形式: research/stocks/{code}/YYYY-MM-DD.md（コード別フォルダ）
+    code_dir = OUTPUT_DIR / code
+    if code_dir.exists():
+        folder_candidates = sorted(
+            [
+                f for f in code_dir.glob("*.md")
+                if "archive" not in str(f) and "_deep_research" not in f.name
+            ],
+            reverse=True,
+        )
+        if folder_candidates:
+            return folder_candidates[0]
+
+    # 旧形式: research/stocks/{code}_*_sonnet_deepdive.md（フラット）
     candidates = sorted(OUTPUT_DIR.glob(f"{code}_*_sonnet_deepdive.md"), reverse=True)
     if not candidates:
         raise FileNotFoundError(
-            f"{code}_*_sonnet_deepdive.md が {OUTPUT_DIR} に見つかりません。"
+            f"レポートが見つかりません。"
+            f" {code_dir}/*.md または {OUTPUT_DIR}/{code}_*_sonnet_deepdive.md を確認してください。"
         )
     return candidates[0]
 

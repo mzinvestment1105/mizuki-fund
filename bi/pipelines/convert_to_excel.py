@@ -85,9 +85,9 @@ JP_HEADERS: dict[str, str] = {
     "Equity_LatestFY": "純資産額_直近期末",
     "PER_Trailing": "PER_実績ベース",
     "PBR_Trailing": "PBR_実績ベース",
-    "ROE_LatestYear": "ROE_今期実績",
+    "ROE_LatestYear": "ROE_実績ベース",
     "EquityToAssetRatio": "自己資本比率",
-    "NumberOfIssuedAndOutstandingSharesAtTheEndOfFiscalYearIncludingTreasuryStock": "期末発行株式数（自己株含む）",
+    "NumberOfIssuedAndOutstandingSharesAtTheEndOfFiscalYearIncludingTreasuryStock": "発行株式総数",
     "ShortMarginTradeVolume": "信用売り残",
     "LongMarginTradeVolume": "信用買い残",
     "LongMargin_WkSeq01": "信用買い残_週次01_最古",
@@ -113,12 +113,18 @@ JP_HEADERS.update(_jp_headers_weekly_short_vol_val())
 # スクリーニング用派生（parquet には含めず Excel のみ）。
 # 信用は playbook 準拠: 買残/発行株・買残/出来高を主とする。
 DERIVED_JP_HEADERS: dict[str, str] = {
-    "Scr_LongMargin_to_SharesOutstanding": "信用買残_発行済株数比",
-    "Scr_LongMargin_to_AvgVol5d": "信用買残_出来高5日比",
+    "Scr_LongMargin_to_SharesOutstanding": "信用買い-発行済比率",
+    "Scr_LongMargin_to_AvgVol5d": "信用買い-出来高倍率",
     "Scr_InstShort_to_Mcap": "機関空売り_時価総額比",
     "Scr_Sales_CAGR2y": "売上高_CAGR2年",
+    "Scr_Sales_Y1": "売上高_成長率Y1",
+    "Scr_Sales_Y2": "売上高_成長率Y2",
     "Scr_OP_CAGR2y": "営業利益_CAGR2年",
+    "Scr_OP_Y1": "営業利益_成長率Y1",
+    "Scr_OP_Y2": "営業利益_成長率Y2",
     "Scr_NI_CAGR2y": "最終益_CAGR2年",
+    "Scr_NI_Y1": "最終益_成長率Y1",
+    "Scr_NI_Y2": "最終益_成長率Y2",
     "Scr_Sales_FcstGrowth": "売上高_予想対実績伸び率",
     "Scr_OP_FcstGrowth": "営業利益_予想対実績伸び率",
     "Scr_NI_FcstGrowth": "最終益_予想対実績伸び率",
@@ -128,17 +134,26 @@ DERIVED_JP_HEADERS: dict[str, str] = {
 # スクリーニング条件シートの行順（Data シートの日本語列名と一致）
 SCREENING_TABLE_COLUMNS: list[tuple[str, str]] = [
     ("時価総額", "円。下限のみ例:  large cap 向けに 300000000000 など"),
-    ("信用買残_発行済株数比", "買残÷期末発行済株数（playbook ①）"),
-    ("信用買残_出来高5日比", "買残÷5日平均出来高＝解消日数目安（playbook ②）"),
+    ("PER_実績ベース", "実績PER（倍）"),
+    ("PBR_実績ベース", "実績PBR（倍）"),
+    ("ROE_実績ベース", "今期ROE（%）"),
+    ("自己資本比率", "小数で入力（例 0.35 = 35%）。データと同じ基準"),
+    ("信用買い-発行済比率", "買残÷期末発行済株数（playbook ①）"),
+    ("信用買い-出来高倍率", "買残÷5日平均出来高＝解消日数目安（playbook ②）"),
     ("機関空売り_時価総額比", "空売り残株×終値÷時価総額"),
+    ("現金同等物_時価総額比", "現金同等物÷時価総額"),
     ("売上高_CAGR2年", "一昨年→今年実績の2年CAGR=(今年/一昨年)^0.5-1。正の実績のみ"),
+    ("売上高_成長率Y1", "一昨年→昨年の単年成長率。正の実績のみ"),
+    ("売上高_成長率Y2", "昨年→今年の単年成長率。正の実績のみ"),
     ("営業利益_CAGR2年", "同上（営業利益）"),
+    ("営業利益_成長率Y1", "一昨年→昨年の単年成長率（営業利益）"),
+    ("営業利益_成長率Y2", "昨年→今年の単年成長率（営業利益）"),
     ("最終益_CAGR2年", "同上（最終益）"),
+    ("最終益_成長率Y1", "一昨年→昨年の単年成長率（最終益）"),
+    ("最終益_成長率Y2", "昨年→今年の単年成長率（最終益）"),
     ("売上高_予想対実績伸び率", "来年予想÷今年実績-1（予想欠損行は計算されません）"),
     ("営業利益_予想対実績伸び率", "同上"),
     ("最終益_予想対実績伸び率", "同上"),
-    ("自己資本比率", "小数で入力（例 0.35 = 35%）。データと同じ基準"),
-    ("現金同等物_時価総額比", "現金同等物÷時価総額"),
 ]
 
 HEADER_FONT = Font(bold=True, color="FFFFFFFF", size=11)
@@ -192,6 +207,43 @@ def _add_screening_derived_columns(df: pd.DataFrame) -> pd.DataFrame:
     )
     out["Scr_NI_CAGR2y"] = _cagr2(
         _numeric_col(out, "Profit_TwoYearsPrior_Actual"),
+        _numeric_col(out, "Profit_LatestYear_Actual"),
+    )
+
+    def _yoy(a0: pd.Series, a1: pd.Series) -> pd.Series:
+        """単年成長率: a1/a0 - 1。両方正の実績のみ計算。"""
+        s0 = pd.to_numeric(a0, errors="coerce")
+        s1 = pd.to_numeric(a1, errors="coerce")
+        ok = s0.notna() & s1.notna() & (s0 > 0) & (s1 > 0)
+        r = pd.Series(pd.NA, index=out.index, dtype="Float64")
+        r.loc[ok] = (s1[ok] / s0[ok]) - 1.0
+        return r
+
+    # 売上高 Y1（一昨年→昨年）・Y2（昨年→今年）
+    out["Scr_Sales_Y1"] = _yoy(
+        _numeric_col(out, "NetSales_TwoYearsPrior_Actual"),
+        _numeric_col(out, "NetSales_PriorYear_Actual"),
+    )
+    out["Scr_Sales_Y2"] = _yoy(
+        _numeric_col(out, "NetSales_PriorYear_Actual"),
+        _numeric_col(out, "NetSales_LatestYear_Actual"),
+    )
+    # 営業利益 Y1・Y2
+    out["Scr_OP_Y1"] = _yoy(
+        _numeric_col(out, "OperatingProfit_TwoYearsPrior_Actual"),
+        _numeric_col(out, "OperatingProfit_PriorYear_Actual"),
+    )
+    out["Scr_OP_Y2"] = _yoy(
+        _numeric_col(out, "OperatingProfit_PriorYear_Actual"),
+        _numeric_col(out, "OperatingProfit_LatestYear_Actual"),
+    )
+    # 最終益 Y1・Y2
+    out["Scr_NI_Y1"] = _yoy(
+        _numeric_col(out, "Profit_TwoYearsPrior_Actual"),
+        _numeric_col(out, "Profit_PriorYear_Actual"),
+    )
+    out["Scr_NI_Y2"] = _yoy(
+        _numeric_col(out, "Profit_PriorYear_Actual"),
         _numeric_col(out, "Profit_LatestYear_Actual"),
     )
 
@@ -325,7 +377,7 @@ def _apply_excel_display_formats_workbook(path: Path, *, header_row: int = 1) ->
         "最終益_一昨年通期実績",
         "現金及び現金同等物_直近期末",
         "純資産額_直近期末",
-        "期末発行株式数（自己株含む）",
+        "発行株式総数",
         "信用売り残",
         "信用買い残",
         "信用買い残_週次01_最古",
@@ -344,18 +396,26 @@ def _apply_excel_display_formats_workbook(path: Path, *, header_row: int = 1) ->
     ratio_metric_jp = {
         "PER_実績ベース",
         "PBR_実績ベース",
-        "ROE_今期実績",
+        "ROE_実績ベース",
     }
     screening_ratio_jp = {
-        "信用買残_発行済株数比",
-        "信用買残_出来高5日比",
         "機関空売り_時価総額比",
         "現金同等物_時価総額比",
+    }
+    screening_long_margin_pct_jp = {
+        "信用買い-発行済比率",
+        "信用買い-出来高倍率",
     }
     screening_rate_as_pct_jp = {
         "売上高_CAGR2年",
         "営業利益_CAGR2年",
         "最終益_CAGR2年",
+        "売上高_成長率Y1",
+        "売上高_成長率Y2",
+        "営業利益_成長率Y1",
+        "営業利益_成長率Y2",
+        "最終益_成長率Y1",
+        "最終益_成長率Y2",
         "売上高_予想対実績伸び率",
         "営業利益_予想対実績伸び率",
         "最終益_予想対実績伸び率",
@@ -369,6 +429,11 @@ def _apply_excel_display_formats_workbook(path: Path, *, header_row: int = 1) ->
                 if cell.value is not None and cell.value != "":
                     cell.number_format = fmt
         elif jp in screening_rate_as_pct_jp:
+            for r in range(header_row + 1, ws.max_row + 1):
+                cell = ws.cell(r, cidx)
+                if cell.value is not None and cell.value != "":
+                    cell.number_format = _NUM_FMT_PERCENT
+        elif jp in screening_long_margin_pct_jp:
             for r in range(header_row + 1, ws.max_row + 1):
                 cell = ws.cell(r, cidx)
                 if cell.value is not None and cell.value != "":
