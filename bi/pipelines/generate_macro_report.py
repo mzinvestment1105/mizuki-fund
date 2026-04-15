@@ -29,6 +29,7 @@ from dotenv import load_dotenv
 
 REPO_ROOT  = Path(__file__).resolve().parents[2]
 MARKET_DIR = REPO_ROOT / "market" / "daily"
+MACRO_DIR  = MARKET_DIR / "macro"
 AGENTS_DIR = REPO_ROOT / "agents"
 _ENV_PATH  = Path(__file__).resolve().parent / ".env"
 
@@ -111,6 +112,8 @@ def build_prompt(
     yesterday_report: str | None,
     snapshot: str,
     target_date: str,
+    finnhub_raw: str | None = None,
+    deep_research: str | None = None,
 ) -> str:
     agent_spec = (AGENTS_DIR / "macro_analyst.md").read_text(encoding="utf-8")
 
@@ -129,6 +132,31 @@ def build_prompt(
 ---
 """
 
+    finnhub_section = ""
+    if finnhub_raw:
+        finnhub_section = f"""
+---
+## グローバルニュース・経済カレンダー（Finnhub）
+以下は Reuters/Bloomberg 等のグローバルニュースと今後の経済指標カレンダーです。
+日本語のニュースと組み合わせて、マクロ環境を総合的に分析してください。
+英語のニュース見出し・要約は内容を理解した上で日本語で分析に反映してください。
+
+{finnhub_raw}
+---
+"""
+
+    deep_research_section = ""
+    if deep_research:
+        deep_research_section = f"""
+---
+## Deep Research 定性分析（外部入力）
+以下は Perplexity 等の Deep Research による詳細調査結果です。
+定量データ・一次情報を積極的に活用し、レポートの各テーマセクションに反映してください。
+
+{deep_research}
+---
+"""
+
     return f"""\
 あなたは Mizuki Fund のマクロ経済アナリストです。
 以下の情報をもとに本日（{target_date}）のマクロレポートを生成してください。
@@ -138,14 +166,29 @@ def build_prompt(
 
 ## 本日の市況スナップショット（yfinance 取得）
 {snapshot}
-{delta_section}
+{delta_section}{finnhub_section}
 ## 本日のニュース生データ（{target_date}_news_raw.md 全文）
 {today_raw}
-
+{deep_research_section}
 ---
 上記情報をもとに agents/macro_analyst.md の仕様に従い、
 `{target_date}_sonnet_macro.md` として出力するレポートを日本語で生成してください。
 マークダウン形式で出力し、コードブロックで囲まないこと。
+
+## ⚠️ 必須出力ルール（絶対に省略禁止）
+
+レポートの**最後**に、必ず以下のフォーマットで「Deep Research 候補」セクションを出力すること。
+このセクションは**省略不可・「なし」の場合もその旨を明記**すること。
+候補が思いつかない場合でも「Deep Research 候補なし（本日は全テーマ解像度十分）」と書くこと。
+
+```
+## 📌 Deep Research 候補
+
+- [ ] 〇〇について（理由: △△が不明確なため）
+- [ ] 〇〇について（理由: △△の影響度を定量化したい）
+```
+
+上記フォーマットを守り、「このレポートで重要だが解像度が足りない」「掘り下げると投資判断が変わりうる」論点を3〜5件リストアップすること。
 """
 
 
@@ -159,8 +202,15 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--date", default=date.today().strftime("%Y-%m-%d"))
     parser.add_argument("--force", action="store_true", help="新着なしでも強制生成")
+    parser.add_argument("--snapshot-only", action="store_true", help="市況スナップショットだけ取得して表示（API不要）")
     args = parser.parse_args()
     target_date: str = args.date
+
+    # スナップショットのみモード（Claude Code手動生成時に使う）
+    if args.snapshot_only:
+        print("市況データ取得中 (yfinance)...")
+        print(get_market_snapshot())
+        sys.exit(EXIT_OK)
 
     # news_raw.md を読み込む
     raw_path = MARKET_DIR / f"{target_date}_news_raw.md"
@@ -173,7 +223,7 @@ def main() -> None:
     # 前日ファイルを読み込む
     yesterday_str = (date.fromisoformat(target_date) - timedelta(days=1)).strftime("%Y-%m-%d")
     yesterday_raw_path    = MARKET_DIR / f"{yesterday_str}_news_raw.md"
-    yesterday_report_path = MARKET_DIR / f"{yesterday_str}_sonnet_macro.md"
+    yesterday_report_path = MACRO_DIR / f"{yesterday_str}.md"
 
     yesterday_raw    = yesterday_raw_path.read_text(encoding="utf-8")    if yesterday_raw_path.exists()    else None
     yesterday_report = yesterday_report_path.read_text(encoding="utf-8") if yesterday_report_path.exists() else None
@@ -185,6 +235,24 @@ def main() -> None:
     if new_count == 0 and not args.force:
         print("[SKIP] 新着記事なし")
         sys.exit(EXIT_SKIP)
+
+    # Finnhub raw データを読み込む（任意・存在しなくてもスキップ）
+    finnhub_path = MARKET_DIR / f"{target_date}_finnhub_raw.md"
+    finnhub_raw: str | None = None
+    if finnhub_path.exists():
+        finnhub_raw = finnhub_path.read_text(encoding="utf-8")
+        print(f"Finnhub データあり: {finnhub_path.name} ({len(finnhub_raw):,} 文字)")
+    else:
+        print(f"Finnhub データなし（{finnhub_path.name}）- fetch_finnhub.py を先に実行するとグローバルニュースが追加されます")
+
+    # Deep Research データを読み込む（任意・存在しなくてもスキップ）
+    deep_research_path = MACRO_DIR / f"{target_date}_deep_research.md"
+    deep_research: str | None = None
+    if deep_research_path.exists():
+        deep_research = deep_research_path.read_text(encoding="utf-8")
+        print(f"Deep Research データあり: {deep_research_path.name} ({len(deep_research):,} 文字)")
+    else:
+        print(f"Deep Research なし({deep_research_path.name}) -- Perplexity 結果をこのパスに保存すると自動統合されます")
 
     # 市況スナップショット取得
     print("市況データ取得中 (yfinance)...")
@@ -203,7 +271,7 @@ def main() -> None:
         print("[ERROR] anthropic パッケージが未インストールです: pip install anthropic", file=sys.stderr)
         sys.exit(EXIT_ERR)
 
-    prompt = build_prompt(today_raw, yesterday_report, snapshot, target_date)
+    prompt = build_prompt(today_raw, yesterday_report, snapshot, target_date, finnhub_raw, deep_research)
     print("Claude API 呼び出し中 (claude-sonnet-4-6)...")
 
     try:
@@ -219,7 +287,8 @@ def main() -> None:
     report_text = message.content[0].text
 
     # 出力
-    output_path = MARKET_DIR / f"{target_date}_sonnet_macro.md"
+    MACRO_DIR.mkdir(parents=True, exist_ok=True)
+    output_path = MACRO_DIR / f"{target_date}.md"
     output_path.write_text(report_text, encoding="utf-8")
 
     in_tok  = message.usage.input_tokens
