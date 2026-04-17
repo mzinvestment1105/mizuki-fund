@@ -192,6 +192,12 @@ def _nx_forecast_require_nxt_fyen() -> bool:
     return raw not in ("0", "false", "no", "off")
 
 
+def _nx_forecast_enable_missing_nxt_fyen_revision_relax() -> bool:
+    """True: NxtFYEn欠損の最新 EarnForecastRevision を救済。0/false/no で無効。"""
+    raw = os.environ.get("NX_FORECAST_RELAXED_REVISION", "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
 def _forecast_first_non_na_from_newest(
     scan: pd.DataFrame,
     consolidated: list[str],
@@ -336,6 +342,37 @@ def _forecast_by_newest_disc_date_with_meta_aligned_nxt_fye(
         if pd.isna(best_dd) or dd > best_dd:
             best_dd = dd
             best_v = v
+
+    if not _nx_forecast_enable_missing_nxt_fyen_revision_relax():
+        return best_v, best_dd
+
+    # strict（NxtFYEn 一致）で古い開示しか拾えないケースを救済:
+    # 最新の EarnForecastRevision が NxtFYEn 欠損でも Nx* が入っていることがある。
+    relaxed_v: Any = pd.NA
+    relaxed_dd = pd.NaT
+    for pos in range(len(scan)):
+        r = scan.iloc[pos]
+        v = _val_from_row(r, consolidated, non_consolidated)
+        if pd.isna(v):
+            continue
+        dd = pd.to_datetime(r.get("DiscDate"), errors="coerce")
+        if pd.isna(dd):
+            continue
+        if pd.notna(d_last) and (d_last - dd).days > max_age_days:
+            continue
+        row_nxt = _normalize_date_scalar(r.get("NxtFYEn"))
+        if pd.notna(row_nxt):
+            continue
+        doc = str(r.get("DocType", "") or "")
+        if "EarnForecastRevision" not in doc:
+            continue
+        if pd.isna(relaxed_dd) or dd > relaxed_dd:
+            relaxed_dd = dd
+            relaxed_v = v
+
+    # strict と relaxed の両方がある場合は、より新しい開示日を優先。
+    if pd.notna(relaxed_v) and (pd.isna(best_v) or (pd.notna(relaxed_dd) and pd.notna(best_dd) and relaxed_dd > best_dd)):
+        return relaxed_v, relaxed_dd
     return best_v, best_dd
 
 
@@ -828,6 +865,7 @@ def aggregate_fins_summary_df(
         out["NumberOfIssuedAndOutstandingSharesAtTheEndOfFiscalYearIncludingTreasuryStock"] = (
             _first_numeric_from_sources(work, ["ShOutFY"])
         )
+
         _apply_forecasts_from_newest_disclosure_row_only(out, work)
         return out, None
 
@@ -842,6 +880,7 @@ def aggregate_fins_summary_df(
         out["NumberOfIssuedAndOutstandingSharesAtTheEndOfFiscalYearIncludingTreasuryStock"] = (
             _first_numeric_from_sources(work, ["ShOutFY"])
         )
+
         _apply_forecasts_from_newest_disclosure_row_only(out, work)
         return out, None
 
