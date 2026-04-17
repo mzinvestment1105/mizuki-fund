@@ -25,6 +25,7 @@ from update_statements import (
     aggregate_fins_summary_df,
     fins_summary_code_variants,
 )
+from tdnet_forecast_parser import fetch_tdnet_range_forecasts
 from yfinance_statement_fallback import (
     build_statement_dict_from_yfinance,
     is_jquants_fins_history_thin,
@@ -619,6 +620,25 @@ def main() -> None:
                     _audit[f"{_k}_Source"] = _src
                 yf_audit_rows.append(_audit)
 
+            # --- TDNet 幅付き予想フォールバック ---
+            # JQuants + yfinance 後も予想列が NULL の銘柄向け。
+            # 幅付き予想（レンジ形式）の 決算短信 PDF をパースして中央値を補完。
+            _FORECAST_COLS = [
+                "NetSales_NextYear_Forecast",
+                "OperatingProfit_NextYear_Forecast",
+                "Profit_NextYear_Forecast",
+            ]
+            _tdnet_used = False
+            if any(pd.isna(ser.get(c)) for c in _FORECAST_COLS):
+                try:
+                    _tdnet = fetch_tdnet_range_forecasts(code4, sleep_seconds=1.0)
+                    for _fc, _fv in _tdnet.items():
+                        if _fc in _FORECAST_COLS and pd.isna(ser.get(_fc)) and pd.notna(_fv):
+                            ser[_fc] = _fv
+                            _tdnet_used = True
+                except Exception:
+                    pass  # サイレントフォールバック: TDNet 取得失敗は無視
+
             # 開示日はマージ用に raw の最大値（列集約後も「直近の開示」に近い）
             if "DiscDate" in fin_df.columns:
                 dd = pd.to_datetime(fin_df["DiscDate"], errors="coerce")
@@ -632,7 +652,7 @@ def main() -> None:
                     del ser[_internal_key]
 
             one_row = pd.DataFrame(
-                [{"Code": code4, **{c: ser[c] for c in STATEMENT_NUMERIC_COLS}, "DiscDate": disc_out, "YFinance_Supplemented": _yf_used}]
+                [{"Code": code4, **{c: ser[c] for c in STATEMENT_NUMERIC_COLS}, "DiscDate": disc_out, "YFinance_Supplemented": _yf_used, "TDNet_Supplemented": _tdnet_used}]
             )
             statement_latest_rows.append(one_row)
 
