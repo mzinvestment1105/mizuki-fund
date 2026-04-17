@@ -13,6 +13,7 @@ jobs:
       - name: チェックアウト
         uses: actions/checkout@v4
         with:
+          ref: master
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Python セットアップ
@@ -34,6 +35,10 @@ jobs:
           JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
           PYTHONIOENCODING: utf-8
           YFINANCE_STATEMENT_FALLBACK: "1"
+          # 来期予想: NxtFYEn欠損の最新業績修正を救済（update_statements.py）
+          NX_FORECAST_RELAXED_REVISION: "1"
+          # 来期予想: JQ欠損時の TDNet 幅付き予想フォールバック（make_screening_master_v2.py）
+          TDNET_FORECAST_FALLBACK: "1"
           MARGIN_INTEREST_LOOKBACK_WEEKS: "8"
           MARGIN_INTEREST_DAY_FALLBACK: "2"
           SHORT_SALE_LOOKBACK_WEEKS: "8"
